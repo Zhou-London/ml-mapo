@@ -1,5 +1,8 @@
+from modules.data_ingestion.main import run as run_ingestion
+
+
 def main():
-    print("Hello from ml-mapo!")
+    run_ingestion()
 
 
 if __name__ == "__main__":
