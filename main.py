@@ -1,8 +1,6 @@
-from modules.data_ingestion.main import run as run_ingestion
-
 
 def main():
-    run_ingestion()
+    print("Hello, World!")
 
 
 if __name__ == "__main__":
