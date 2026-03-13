@@ -45,7 +45,13 @@ class AssetData(pydantic.BaseModel):
     volume: list[int] = []
 
     def __str__(self):
-        return f"Asset(symbol={self.symbol}, date={self.date}, open={self.open}, high={self.high}, low={self.low}, close={self.close}, volume={self.volume})"
+        lines = [f"AssetData(symbol={self.symbol}, rows={self.size()})"]
+        for i in range(self.size()):
+            lines.append(
+                f"  {self.date[i]} | O:{self.open[i]:.2f} H:{self.high[i]:.2f}"
+                f" L:{self.low[i]:.2f} C:{self.close[i]:.2f} V:{self.volume[i]}"
+            )
+        return "\n".join(lines)
 
     def size(self):
         return len(self.date)
@@ -91,6 +97,7 @@ def main():
         CurrencyEnum.USD,
         1.0
     )
+    PERIOD = "1mo"
     print(portfolio)
     print("")
 
@@ -99,9 +106,9 @@ def main():
     for i in range(portfolio.size()):
         if(portfolio.assetType[i] == AssetEnum.Equity):
             if(portfolio.currencyType[i] == CurrencyEnum.USD):
-                
+
                 dataframe = yfinance.Ticker(portfolio.symbol[i])
-                history = dataframe.history(period="5d")
+                history = dataframe.history(period=PERIOD)
 
                 assetData = AssetData(symbol=portfolio.symbol[i])
                 for date, row in history.iterrows():
