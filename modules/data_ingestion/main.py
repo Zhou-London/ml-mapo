@@ -97,7 +97,15 @@ def main():
         CurrencyEnum.USD,
         1.0
     )
-    PERIOD = "1mo"
+    portfolio.push_back(
+        "GOOGL",
+        AssetEnum.Equity,
+        CurrencyEnum.USD,
+        1.0
+    )
+
+
+    PERIOD = "5d"
     print(portfolio)
     print("")
 
@@ -122,7 +130,8 @@ def main():
                     )
                 assetDataTable.append(assetData)
 
-    print(assetDataTable[0])
+    for i in range(len(assetDataTable)):
+        print(assetDataTable[i])
 
 if __name__ == "__main__":
     main()
