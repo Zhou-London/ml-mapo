@@ -115,8 +115,12 @@ def main():
         if(portfolio.assetType[i] == AssetEnum.Equity):
             if(portfolio.currencyType[i] == CurrencyEnum.USD):
 
-                dataframe = yfinance.Ticker(portfolio.symbol[i])
-                history = dataframe.history(period=PERIOD)
+                try:
+                    dataframe = yfinance.Ticker(portfolio.symbol[i])
+                    history = dataframe.history(period=PERIOD)
+                except Exception as e:
+                    print(f"[ERROR]: yfinance failed to fetch data for {portfolio.symbol[i]}: {e}")
+                    continue
 
                 assetData = AssetData(symbol=portfolio.symbol[i])
                 for date, row in history.iterrows():
