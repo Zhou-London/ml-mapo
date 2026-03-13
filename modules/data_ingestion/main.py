@@ -2,9 +2,41 @@ import pydantic
 import datetime
 import yfinance
 
+from enum import Enum
 
-class Asset(pydantic.BaseModel):
-    symbol: str
+# Structs
+class AssetEnum(Enum):
+    Equity = 1
+    Crypto = 2
+
+class CurrencyEnum(Enum):
+    USD = 1
+    GBP = 2
+
+class Portfolio(pydantic.BaseModel):
+    symbol: list[str] = []
+    assetType: list[AssetEnum] = []
+    currencyType: list[CurrencyEnum] = []
+    amount: list[float] = []
+
+    def __str__(self):
+        lines = [f"Portfolio(size={self.size()})"]
+        for i in range(self.size()):
+            lines.append(f"  {self.symbol[i]} | {self.assetType[i].name} | {self.currencyType[i].name} | {self.amount[i]}")
+        return "\n".join(lines)
+
+    def size(self):
+        return len(self.symbol)
+    
+    def push_back(self, symbol:str, assetType: AssetEnum, currencyType: CurrencyEnum, amount: float):
+        self.symbol.append(symbol)
+        self.assetType.append(assetType)
+        self.currencyType.append(currencyType)
+        self.amount.append(amount)
+
+
+class AssetData(pydantic.BaseModel):
+    symbol: str = ""
     date: list[datetime.date] = []
     open: list[float] = []
     high: list[float] = []
@@ -15,7 +47,10 @@ class Asset(pydantic.BaseModel):
     def __str__(self):
         return f"Asset(symbol={self.symbol}, date={self.date}, open={self.open}, high={self.high}, low={self.low}, close={self.close}, volume={self.volume})"
 
-    def add_data(
+    def size(self):
+        return len(self.date)
+
+    def push_back(
         self,
         date: datetime.date,
         open: float,
@@ -45,23 +80,42 @@ class Asset(pydantic.BaseModel):
         self.close.append(close)
         self.volume.append(volume)
 
+# Main
+def main():
 
-USEquities: list[Asset] = []
-
-aapl = Asset(symbol="AAPL")
-dataframe = yfinance.Ticker("AAPL")
-history = dataframe.history(period="1mo")
-for date, row in history.iterrows():
-    aapl.add_data(
-        date=date.date(),
-        open=row["Open"],
-        high=row["High"],
-        low=row["Low"],
-        close=row["Close"],
-        volume=int(row["Volume"]),
+    # User input
+    portfolio = Portfolio()
+    portfolio.push_back(
+        "AAPL",
+        AssetEnum.Equity,
+        CurrencyEnum.USD,
+        1.0
     )
+    print(portfolio)
+    print("")
 
-for i in range(len(aapl.date)):
-    print(aapl.date[i], " ", aapl.open[i])
+    assetDataTable: list[AssetData] = []
 
-USEquities.append(aapl)
+    for i in range(portfolio.size()):
+        if(portfolio.assetType[i] == AssetEnum.Equity):
+            if(portfolio.currencyType[i] == CurrencyEnum.USD):
+                
+                dataframe = yfinance.Ticker(portfolio.symbol[i])
+                history = dataframe.history(period="5d")
+
+                assetData = AssetData(symbol=portfolio.symbol[i])
+                for date, row in history.iterrows():
+                    assetData.push_back(
+                        date=date.date(),
+                        open=row["Open"],
+                        high=row["High"],
+                        low=row["Low"],
+                        close=row["Close"],
+                        volume=int(row["Volume"]),
+                    )
+                assetDataTable.append(assetData)
+
+    print(assetDataTable[0])
+
+if __name__ == "__main__":
+    main()
