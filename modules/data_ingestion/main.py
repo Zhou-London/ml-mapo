@@ -103,6 +103,12 @@ def main():
         CurrencyEnum.USD,
         1.0
     )
+    portfolio.push_back(
+        "HSBA",
+        AssetEnum.Equity,
+        CurrencyEnum.GBP,
+        1.0
+    )
 
 
     PERIOD = "5d"
@@ -114,7 +120,6 @@ def main():
     for i in range(portfolio.size()):
         if(portfolio.assetType[i] == AssetEnum.Equity):
             if(portfolio.currencyType[i] == CurrencyEnum.USD):
-
                 try:
                     dataframe = yfinance.Ticker(portfolio.symbol[i])
                     history = dataframe.history(period=PERIOD)
@@ -130,6 +135,30 @@ def main():
                         high=row["High"],
                         low=row["Low"],
                         close=row["Close"],
+                        volume=int(row["Volume"]),
+                    )
+                assetDataTable.append(assetData)
+
+            elif(portfolio.currencyType[i] == CurrencyEnum.GBP):
+                try:
+                    FX: float = 1.35 # ! GBP -> USD
+                    multiplier: float = 0.01 # Pennies -> Pounds
+
+                    tickerName = portfolio.symbol[i] + ".L"
+                    dataframe = yfinance.Ticker(tickerName)
+                    history = dataframe.history(period=PERIOD)
+                except Exception as e:
+                    print(f"[ERROR]: yfinance failed to fetch data for {portfolio.symbol[i]}: {e}")
+                    continue
+
+                assetData = AssetData(symbol=portfolio.symbol[i])
+                for date, row in history.iterrows():
+                    assetData.push_back(
+                        date=date.date(),
+                        open=row["Open"] * multiplier * FX,
+                        high=row["High"] * multiplier * FX,
+                        low=row["Low"] * multiplier * FX,
+                        close=row["Close"] * multiplier * FX,
                         volume=int(row["Volume"]),
                     )
                 assetDataTable.append(assetData)
