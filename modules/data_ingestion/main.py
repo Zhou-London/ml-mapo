@@ -119,6 +119,7 @@ def main():
     assetDataTable: list[AssetData] = []
 
     for i in range(portfolio.size()):
+        # * Equity
         if portfolio.assetType[i] == AssetEnum.Equity:
             if portfolio.currencyType[i] == CurrencyEnum.USD:
                 try:
@@ -174,6 +175,7 @@ def main():
                 )
                 continue
 
+        # * FX
         elif portfolio.assetType[i] == AssetEnum.FX:
             if portfolio.currencyType[i] == CurrencyEnum.USD:
                 try:
@@ -198,6 +200,7 @@ def main():
                     )
                 assetDataTable.append(assetData)
 
+        # * Unsupported
         else:
             print(
                 f"[ERROR]: Asset not supported for {portfolio.assetType[i]}: Currency {portfolio.currencyType[i]}"
