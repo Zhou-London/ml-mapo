@@ -1,13 +1,9 @@
-"""Optimization module.
-
-Subscribes to the covariance matrix from the risk module and the alpha
-vector from the forecast module, then runs mean-variance optimization
-(MVO) to produce a set of portfolio weights.
-"""
+"""Optimization module: receive alpha and covariance, solve MVO, print the resulting weights."""
 
 from __future__ import annotations
 
 import pickle
+import signal
 
 import numpy as np
 import pandas as pd
@@ -29,23 +25,19 @@ def mean_variance_optimize(
     risk_aversion: float = RISK_AVERSION,
     long_only: bool = LONG_ONLY,
 ) -> pd.Series:
-    """Solve a classic MVO portfolio.
-
-    Maximize  alpha' w - (lambda/2) w' Sigma w
-    Subject to 1'w = 1, optionally w >= 0.
-    """
-
+    """Solve max α'w − (λ/2)w'Σw subject to 1'w=1 (and w≥0 if long_only) via SLSQP."""
     tickers = [t for t in alpha.index if t in cov.index]
     if not tickers:
         raise ValueError("no overlap between alpha and covariance tickers")
+
     mu = alpha.loc[tickers].to_numpy(dtype=float)
     sigma = cov.loc[tickers, tickers].to_numpy(dtype=float)
     n = len(tickers)
 
-    def neg_util(w: np.ndarray) -> float:
+    def neg_utility(w: np.ndarray) -> float:
         return float(-(mu @ w) + 0.5 * risk_aversion * w @ sigma @ w)
 
-    def neg_util_jac(w: np.ndarray) -> np.ndarray:
+    def neg_utility_jac(w: np.ndarray) -> np.ndarray:
         return -mu + risk_aversion * (sigma @ w)
 
     constraints = [
@@ -59,9 +51,9 @@ def mean_variance_optimize(
     w0 = np.full(n, 1.0 / n)
 
     result = minimize(
-        neg_util,
+        neg_utility,
         w0,
-        jac=neg_util_jac,
+        jac=neg_utility_jac,
         method="SLSQP",
         bounds=bounds,
         constraints=constraints,
@@ -72,7 +64,8 @@ def mean_variance_optimize(
     return pd.Series(result.x, index=tickers)
 
 
-def main() -> None:
+def make_sockets() -> tuple[zmq.Context, zmq.Socket, zmq.Socket, zmq.Poller]:
+    """Build SUB sockets for risk and forecast inputs, plus a poller registered on both."""
     ctx = zmq.Context.instance()
 
     sub_cov = ctx.socket(zmq.SUB)
@@ -87,6 +80,23 @@ def main() -> None:
     poller.register(sub_cov, zmq.POLLIN)
     poller.register(sub_alpha, zmq.POLLIN)
 
+    return ctx, sub_cov, sub_alpha, poller
+
+
+def print_weights(weights: pd.Series) -> None:
+    """Pretty-print MVO weights, largest first."""
+    print("[opt] MVO weights:")
+    for ticker, w in weights.sort_values(ascending=False).items():
+        print(f"  {ticker:>6}  {w:+.4f}")
+
+
+def main() -> None:
+    """Run the optimization loop: poll inputs, solve MVO when both are fresh, print weights."""
+    # Make SIGTERM raise KeyboardInterrupt so the finally block below runs
+    # and the SUB sockets are closed cleanly before the process exits.
+    signal.signal(signal.SIGTERM, signal.default_int_handler)
+
+    ctx, sub_cov, sub_alpha, poller = make_sockets()
     print(f"[opt] listening — risk: {RISK_ADDR}  forecast: {FORECAST_ADDR}")
 
     latest_cov: dict | None = None
@@ -108,15 +118,13 @@ def main() -> None:
                 weights = mean_variance_optimize(
                     latest_alpha["alpha"], latest_cov["covariance"]
                 )
-                print("[opt] MVO weights:")
-                for ticker, w in weights.sort_values(ascending=False).items():
-                    print(f"  {ticker:>6}  {w:+.4f}")
-                # Wait for a fresh pair of inputs before solving again.
+                print_weights(weights)
                 latest_cov = None
                 latest_alpha = None
     except KeyboardInterrupt:
         pass
     finally:
+        print("[opt] closing sockets")
         sub_cov.close(linger=0)
         sub_alpha.close(linger=0)
         ctx.term()

@@ -1,13 +1,9 @@
-"""Forecast module.
-
-Subscribes to OHLCV snapshots from the data module, evaluates one or more
-pluggable AlphaFactors, combines their scores, and publishes a forecasted
-return vector for the optimization module to consume.
-"""
+"""Forecast module: subscribe to OHLCV, score alpha factors, publish combined alpha over ZMQ."""
 
 from __future__ import annotations
 
 import pickle
+import signal
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
 
@@ -21,14 +17,17 @@ TOPIC_OHLCV = b"OHLCV"
 TOPIC_ALPHA = b"ALPHA"
 
 
-class AlphaFactor(ABC):
-    """Interface for an alpha factor.
+def adj_close_panel(ohlcv: dict[str, pd.DataFrame]) -> pd.DataFrame:
+    """Stack per-ticker OHLCV frames into a single DataFrame of adjusted closes."""
+    return (
+        pd.concat({t: df["adj_close"] for t, df in ohlcv.items()}, axis=1)
+        .sort_index()
+        .dropna(how="all")
+    )
 
-    Implementations consume a ``{ticker: OHLCV DataFrame}`` mapping and
-    return a pandas Series of expected returns (annualized) indexed by
-    ticker. The composer below z-scores factor scores before combining so
-    factors can return either raw returns or unitless signals.
-    """
+
+class AlphaFactor(ABC):
+    """Interface: take {ticker: OHLCV} and return an annualized expected-return Series."""
 
     name: str = "alpha_factor"
 
@@ -37,9 +36,7 @@ class AlphaFactor(ABC):
 
 
 class NaiveMomentumAlpha(AlphaFactor):
-    """12-1 momentum: mean daily log-return over the trailing year,
-    excluding the most recent month, annualized. A standard baseline.
-    """
+    """12-1 momentum: mean daily log-return over the trailing year minus the last month, annualized."""
 
     name = "momentum_12_1"
 
@@ -49,11 +46,8 @@ class NaiveMomentumAlpha(AlphaFactor):
         self.trading_days = trading_days
 
     def score(self, ohlcv: dict[str, pd.DataFrame]) -> pd.Series:
-        closes = (
-            pd.concat({t: df["adj_close"] for t, df in ohlcv.items()}, axis=1)
-            .sort_index()
-            .dropna(how="all")
-        )
+        """Compute per-ticker momentum scores from adjusted closes."""
+        closes = adj_close_panel(ohlcv)
         returns = np.log(closes / closes.shift(1)).dropna()
         if self.skip > 0:
             window = returns.iloc[-self.lookback : -self.skip]
@@ -65,15 +59,7 @@ class NaiveMomentumAlpha(AlphaFactor):
 def ir_weighted_combine(
     scores: dict[str, pd.Series], information_ratios: dict[str, float]
 ) -> pd.Series:
-    """Combine per-factor scores by information-ratio weighting.
-
-    Each factor's scores are z-scored cross-sectionally, then combined with
-    weights proportional to their IRs. With a single factor this degenerates
-    to the factor itself (up to rescaling). The result is rescaled to the
-    average per-factor magnitude so it can be interpreted as an expected
-    return instead of an abstract z-score.
-    """
-
+    """Combine z-scored factors by IR weights, then rescale back to a return magnitude."""
     if not scores:
         raise ValueError("no factor scores to combine")
 
@@ -87,29 +73,36 @@ def ir_weighted_combine(
     for name, s in scores.items():
         std = s.std(ddof=0)
         z = (s - s.mean()) / (std if std > 0 else 1.0)
-        w = information_ratios.get(name, 1.0) / weight_norm
-        combined = combined.add(z * w, fill_value=0.0)
+        combined = combined.add(
+            z * (information_ratios.get(name, 1.0) / weight_norm), fill_value=0.0
+        )
 
-    # Rescale z-score-space combination back to a return magnitude.
-    avg_mag = float(np.mean([s.abs().mean() for s in scores.values()]))
-    return combined * avg_mag
+    avg_magnitude = float(np.mean([s.abs().mean() for s in scores.values()]))
+    return combined * avg_magnitude
 
 
-def main() -> None:
+def make_sockets() -> tuple[zmq.Context, zmq.Socket, zmq.Socket]:
+    """Build the SUB socket for OHLCV input and the PUB socket for alpha output."""
     ctx = zmq.Context.instance()
-
     sub = ctx.socket(zmq.SUB)
     sub.connect(DATA_ADDR)
     sub.setsockopt(zmq.SUBSCRIBE, TOPIC_OHLCV)
-
     pub = ctx.socket(zmq.PUB)
     pub.bind(PUB_ADDR)
+    return ctx, sub, pub
 
+
+def main() -> None:
+    """Run the forecast loop: receive a snapshot, score factors, combine, publish."""
+    # Make SIGTERM raise KeyboardInterrupt so the finally block below runs
+    # and the SUB/PUB sockets are closed cleanly before the process exits.
+    signal.signal(signal.SIGTERM, signal.default_int_handler)
+
+    ctx, sub, pub = make_sockets()
     print(f"[forecast] subscribed to {DATA_ADDR}; publishing on {PUB_ADDR}")
 
     factors: Iterable[AlphaFactor] = [NaiveMomentumAlpha()]
-    # In a real system IRs are estimated from a historical backtest; for the
-    # demo we assume each factor is equally informative.
+    # IRs would normally come from a backtest; for the demo all factors are equal.
     information_ratios = {f.name: 1.0 for f in factors}
 
     try:
@@ -134,6 +127,7 @@ def main() -> None:
     except KeyboardInterrupt:
         pass
     finally:
+        print("[forecast] closing sockets")
         sub.close(linger=0)
         pub.close(linger=0)
         ctx.term()

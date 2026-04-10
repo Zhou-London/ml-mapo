@@ -1,12 +1,4 @@
-"""Prototype runner.
-
-Launches every standalone module of the demo quant system in its own
-subprocess, wires their stdout/stderr through to the parent terminal, and
-shuts them down cleanly on Ctrl+C or when any one of them exits.
-
-Subscribers are started before the publisher so they have time to connect
-their ZeroMQ SUB sockets before the data module begins publishing.
-"""
+"""Prototype runner: launch the four standalone modules as subprocesses and supervise them."""
 
 from __future__ import annotations
 
@@ -19,7 +11,8 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 PYTHON = sys.executable
 
-# Order matters: subscribers first, publisher (data) last.
+# Order matters: subscribers first, publisher (data) last, so SUB sockets are
+# already connected when the data PUB starts broadcasting.
 MODULES: list[tuple[str, Path]] = [
     ("optimization", HERE / "optimization" / "main.py"),
     ("forecast", HERE / "forecast" / "main.py"),
@@ -27,9 +20,49 @@ MODULES: list[tuple[str, Path]] = [
     ("data", HERE / "data" / "main.py"),
 ]
 
+SHUTDOWN_TIMEOUT_S = 10.0
+
+
+def spawn_modules() -> list[tuple[str, subprocess.Popen]]:
+    """Start each module in its own session so terminal Ctrl+C reaches only the runner."""
+    procs: list[tuple[str, subprocess.Popen]] = []
+    for name, path in MODULES:
+        print(f"[runner] starting {name}: {path}")
+        # start_new_session=True puts the child in a fresh process group, so a
+        # SIGINT delivered to the foreground (the runner) does not also signal
+        # the child. The runner forwards a clean SIGTERM during shutdown
+        # instead, which the child handles via signal.default_int_handler.
+        procs.append(
+            (name, subprocess.Popen([PYTHON, str(path)], start_new_session=True))
+        )
+        time.sleep(0.4)
+    return procs
+
+
+def terminate_all(procs: list[tuple[str, subprocess.Popen]]) -> None:
+    """SIGTERM every still-running child, then SIGKILL any that overstay SHUTDOWN_TIMEOUT_S."""
+    for _, p in procs:
+        if p.poll() is None:
+            try:
+                p.terminate()
+            except ProcessLookupError:
+                pass
+    deadline = time.monotonic() + SHUTDOWN_TIMEOUT_S
+    for name, p in procs:
+        try:
+            p.wait(timeout=max(0.0, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            print(f"[runner] {name} did not exit after {SHUTDOWN_TIMEOUT_S:.0f}s, killing")
+            p.kill()
+            try:
+                p.wait(timeout=2.0)
+            except subprocess.TimeoutExpired:
+                pass
+
 
 def main() -> None:
-    procs: list[tuple[str, subprocess.Popen]] = []
+    """Spawn all modules and clean up on signal or child death."""
+    procs = spawn_modules()
     shutting_down = False
 
     def shutdown(*_: object) -> None:
@@ -38,27 +71,11 @@ def main() -> None:
             return
         shutting_down = True
         print("\n[runner] shutting down modules")
-        for name, p in procs:
-            if p.poll() is None:
-                p.terminate()
-        deadline = time.monotonic() + 5.0
-        for name, p in procs:
-            remaining = max(0.0, deadline - time.monotonic())
-            try:
-                p.wait(timeout=remaining)
-            except subprocess.TimeoutExpired:
-                print(f"[runner] {name} did not exit, killing")
-                p.kill()
+        terminate_all(procs)
         sys.exit(0)
 
     signal.signal(signal.SIGINT, shutdown)
     signal.signal(signal.SIGTERM, shutdown)
-
-    for name, path in MODULES:
-        print(f"[runner] starting {name}: {path}")
-        p = subprocess.Popen([PYTHON, str(path)])
-        procs.append((name, p))
-        time.sleep(0.4)
 
     try:
         while True:

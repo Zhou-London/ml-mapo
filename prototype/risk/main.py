@@ -1,13 +1,9 @@
-"""Risk module.
-
-Subscribes to OHLCV snapshots from the data module, computes a covariance
-matrix via a pluggable RiskFactor, and publishes the result so the
-optimization module can consume it.
-"""
+"""Risk module: subscribe to OHLCV, compute a covariance matrix, publish it over ZMQ."""
 
 from __future__ import annotations
 
 import pickle
+import signal
 from abc import ABC, abstractmethod
 
 import numpy as np
@@ -20,14 +16,17 @@ TOPIC_OHLCV = b"OHLCV"
 TOPIC_COV = b"COV"
 
 
-class RiskFactor(ABC):
-    """Interface for a risk factor model.
+def adj_close_panel(ohlcv: dict[str, pd.DataFrame]) -> pd.DataFrame:
+    """Stack per-ticker OHLCV frames into a single DataFrame of adjusted closes."""
+    return (
+        pd.concat({t: df["adj_close"] for t, df in ohlcv.items()}, axis=1)
+        .sort_index()
+        .dropna(how="all")
+    )
 
-    Implementations consume a ``{ticker: OHLCV DataFrame}`` mapping and
-    return an (n x n) covariance matrix whose rows and columns are tickers.
-    Callers are expected to have already filtered the input to the set of
-    assets they care about.
-    """
+
+class RiskFactor(ABC):
+    """Interface: take {ticker: OHLCV} and return an (n×n) covariance matrix indexed by ticker."""
 
     name: str = "risk_factor"
 
@@ -36,11 +35,7 @@ class RiskFactor(ABC):
 
 
 class NaiveRiskFactor(RiskFactor):
-    """Annualized sample covariance of daily log returns on adjusted closes.
-
-    This is the textbook baseline — no shrinkage, no factor decomposition —
-    and is meant as the default the user can compare custom models against.
-    """
+    """Annualized sample covariance of daily log-returns on adjusted closes (no shrinkage)."""
 
     name = "naive_sample_cov"
 
@@ -49,26 +44,30 @@ class NaiveRiskFactor(RiskFactor):
         self.trading_days = trading_days
 
     def covariance(self, ohlcv: dict[str, pd.DataFrame]) -> pd.DataFrame:
-        closes = (
-            pd.concat({t: df["adj_close"] for t, df in ohlcv.items()}, axis=1)
-            .sort_index()
-            .dropna(how="all")
-        )
+        """Compute the lookback-window sample covariance and annualize it."""
+        closes = adj_close_panel(ohlcv)
         returns = np.log(closes / closes.shift(1)).dropna()
-        window = returns.iloc[-self.lookback :]
-        return window.cov() * self.trading_days
+        return returns.iloc[-self.lookback :].cov() * self.trading_days
 
 
-def main() -> None:
+def make_sockets() -> tuple[zmq.Context, zmq.Socket, zmq.Socket]:
+    """Build the SUB socket for OHLCV input and the PUB socket for covariance output."""
     ctx = zmq.Context.instance()
-
     sub = ctx.socket(zmq.SUB)
     sub.connect(DATA_ADDR)
     sub.setsockopt(zmq.SUBSCRIBE, TOPIC_OHLCV)
-
     pub = ctx.socket(zmq.PUB)
     pub.bind(PUB_ADDR)
+    return ctx, sub, pub
 
+
+def main() -> None:
+    """Run the risk loop: receive a snapshot, compute covariance, publish."""
+    # Make SIGTERM raise KeyboardInterrupt so the finally block below runs
+    # and the SUB/PUB sockets are closed cleanly before the process exits.
+    signal.signal(signal.SIGTERM, signal.default_int_handler)
+
+    ctx, sub, pub = make_sockets()
     print(f"[risk] subscribed to {DATA_ADDR}; publishing on {PUB_ADDR}")
 
     factor: RiskFactor = NaiveRiskFactor()
@@ -78,10 +77,7 @@ def main() -> None:
             _, payload = sub.recv_multipart()
             data = pickle.loads(payload)
             cov = factor.covariance(data["ohlcv"])
-            print(
-                f"[risk] {factor.name}: computed {cov.shape[0]}x{cov.shape[1]} "
-                f"covariance matrix"
-            )
+            print(f"[risk] {factor.name}: computed {cov.shape[0]}x{cov.shape[1]} covariance")
             pub.send_multipart(
                 [
                     TOPIC_COV,
@@ -97,6 +93,7 @@ def main() -> None:
     except KeyboardInterrupt:
         pass
     finally:
+        print("[risk] closing sockets")
         sub.close(linger=0)
         pub.close(linger=0)
         ctx.term()
