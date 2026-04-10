@@ -1,15 +1,13 @@
 """--- Import start ---"""
 
 from __future__ import annotations
-
 import pickle
 import signal
 import time
 from datetime import date, timedelta
-
 import pandas as pd
-import yfinance as yf
 import zmq
+from adaptors import DataSourceAdaptor, YfAdaptor
 from sqlalchemy import (
     BigInteger,
     Date,
@@ -85,16 +83,8 @@ def setup_database():
     return engine
 
 
-def _flatten_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Drop the multi-index column wrapping yfinance adds for single-ticker downloads."""
-    if isinstance(df.columns, pd.MultiIndex):
-        df = df.copy()
-        df.columns = [c[0] for c in df.columns]
-    return df
-
-
 def _row_to_orm(ticker: str, ts, row) -> OHLCV:
-    """Build one OHLCV ORM instance from a yfinance index/row pair."""
+    """Build one OHLCV ORM instance from a canonical OHLCV index/row pair."""
     return OHLCV(
         ticker=ticker,
         ts=ts.date() if hasattr(ts, "date") else ts,
@@ -128,23 +118,24 @@ def find_missing_ranges(
     return gaps
 
 
-def fetch_range(ticker: str, lo: date, hi: date) -> list[OHLCV]:
-    """Download [lo, hi] inclusive from yfinance and return ORM rows (empty if none)."""
-    df = yf.download(
-        ticker,
-        start=lo.isoformat(),
-        end=(hi + timedelta(days=1)).isoformat(),  # yfinance end is exclusive
-        auto_adjust=False,
-        progress=False,
-    )
-    if df is None or df.empty:
+def fetch_range(
+    adaptor: DataSourceAdaptor, ticker: str, lo: date, hi: date
+) -> list[OHLCV]:
+    """Pull [lo, hi] from the given data source adaptor and return ORM rows (empty if none)."""
+    df = adaptor.fetch_ohlcv(ticker, lo, hi)
+    if df.empty:
         return []
-    df = _flatten_columns(df)
     return [_row_to_orm(ticker, ts, row) for ts, row in df.iterrows()]
 
 
-def fetch_and_store(engine, tickers: list[str], start: date, end: date) -> None:
-    """For each ticker, fill any missing-day gaps in [start, end] from data source."""
+def fetch_and_store(
+    engine,
+    adaptor: DataSourceAdaptor,
+    tickers: list[str],
+    start: date,
+    end: date,
+) -> None:
+    """For each ticker, fill any missing-day gaps in [start, end] from the given adaptor."""
     Session = sessionmaker(bind=engine, future=True)
     with Session() as session:
         for ticker in tickers:
@@ -155,8 +146,8 @@ def fetch_and_store(engine, tickers: list[str], start: date, end: date) -> None:
 
             fetched = 0
             for lo, hi in gaps:
-                print(f"[data] {ticker}: fetching {lo} → {hi}")
-                rows = fetch_range(ticker, lo, hi)
+                print(f"[data] {ticker}: fetching {lo} → {hi} via {adaptor.name}")
+                rows = fetch_range(adaptor, ticker, lo, hi)
                 for row in rows:
                     session.merge(row)
                 fetched += len(rows)
@@ -219,7 +210,8 @@ def main() -> None:
 
     # Ensure the database is up to date, then load the snapshot to publish
     engine = setup_database()
-    fetch_and_store(engine, TARGET_TICKERS, start, end)
+    adaptor: DataSourceAdaptor = YfAdaptor()
+    fetch_and_store(engine, adaptor, TARGET_TICKERS, start, end)
     snapshot = load_snapshot(engine, TARGET_TICKERS, start, end)
 
     if not snapshot:
