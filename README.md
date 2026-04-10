@@ -16,7 +16,7 @@ $ source .venv/bin/activate
 
 (Optional) Alternatively, use `uv run` instead of `python`:
 ```zsh
-$ uv run main.py
+$ uv run python main.py
 ``` 
 
 Install the python dependencies using `uv`. This will install packages including pytorch, pandas, etc.
@@ -25,3 +25,8 @@ $ uv sync
 ```
 
 Install PostgresSQL and TimescaleDB following the tutorial [here](https://github.com/timescale/timescaledb).
+
+Run the prototype
+```zsh
+$ uv run python prototype/main.py
+```
