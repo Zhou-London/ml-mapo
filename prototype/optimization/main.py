@@ -1,4 +1,4 @@
-"""Optimization module: receive alpha and covariance, solve MVO, print the resulting weights."""
+"""--- Import start ---"""
 
 from __future__ import annotations
 
@@ -10,6 +10,9 @@ import pandas as pd
 import zmq
 from scipy.optimize import minimize
 
+"""--- Import end ---"""
+
+"""--- Config start ---"""
 RISK_ADDR = "tcp://localhost:5556"
 FORECAST_ADDR = "tcp://localhost:5557"
 TOPIC_COV = b"COV"
@@ -17,6 +20,7 @@ TOPIC_ALPHA = b"ALPHA"
 
 RISK_AVERSION = 50.0
 LONG_ONLY = True
+"""--- Config end ---"""
 
 
 def mean_variance_optimize(
@@ -25,7 +29,7 @@ def mean_variance_optimize(
     risk_aversion: float = RISK_AVERSION,
     long_only: bool = LONG_ONLY,
 ) -> pd.Series:
-    """Solve max α'w − (λ/2)w'Σw subject to 1'w=1 (and w≥0 if long_only) via SLSQP."""
+    """Classic MVO"""
     tickers = [t for t in alpha.index if t in cov.index]
     if not tickers:
         raise ValueError("no overlap between alpha and covariance tickers")
@@ -91,9 +95,6 @@ def print_weights(weights: pd.Series) -> None:
 
 
 def main() -> None:
-    """Run the optimization loop: poll inputs, solve MVO when both are fresh, print weights."""
-    # Make SIGTERM raise KeyboardInterrupt so the finally block below runs
-    # and the SUB sockets are closed cleanly before the process exits.
     signal.signal(signal.SIGTERM, signal.default_int_handler)
 
     ctx, sub_cov, sub_alpha, poller = make_sockets()
@@ -108,7 +109,9 @@ def main() -> None:
             if sub_cov in events:
                 _, payload = sub_cov.recv_multipart()
                 latest_cov = pickle.loads(payload)
-                print(f"[opt] received covariance ({len(latest_cov['tickers'])} tickers)")
+                print(
+                    f"[opt] received covariance ({len(latest_cov['tickers'])} tickers)"
+                )
             if sub_alpha in events:
                 _, payload = sub_alpha.recv_multipart()
                 latest_alpha = pickle.loads(payload)

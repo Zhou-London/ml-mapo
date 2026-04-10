@@ -1,4 +1,4 @@
-"""Risk module: subscribe to OHLCV, compute a covariance matrix, publish it over ZMQ."""
+"""--- Import start ---"""
 
 from __future__ import annotations
 
@@ -10,10 +10,14 @@ import numpy as np
 import pandas as pd
 import zmq
 
+"""--- Import end ---"""
+
+"""--- Config start ---"""
 DATA_ADDR = "tcp://localhost:5555"
 PUB_ADDR = "tcp://*:5556"
 TOPIC_OHLCV = b"OHLCV"
 TOPIC_COV = b"COV"
+"""--- Config end ---"""
 
 
 def adj_close_panel(ohlcv: dict[str, pd.DataFrame]) -> pd.DataFrame:
@@ -35,7 +39,7 @@ class RiskFactor(ABC):
 
 
 class NaiveRiskFactor(RiskFactor):
-    """Annualized sample covariance of daily log-returns on adjusted closes (no shrinkage)."""
+    """Sample risk factor"""
 
     name = "naive_sample_cov"
 
@@ -63,8 +67,6 @@ def make_sockets() -> tuple[zmq.Context, zmq.Socket, zmq.Socket]:
 
 def main() -> None:
     """Run the risk loop: receive a snapshot, compute covariance, publish."""
-    # Make SIGTERM raise KeyboardInterrupt so the finally block below runs
-    # and the SUB/PUB sockets are closed cleanly before the process exits.
     signal.signal(signal.SIGTERM, signal.default_int_handler)
 
     ctx, sub, pub = make_sockets()
@@ -77,7 +79,9 @@ def main() -> None:
             _, payload = sub.recv_multipart()
             data = pickle.loads(payload)
             cov = factor.covariance(data["ohlcv"])
-            print(f"[risk] {factor.name}: computed {cov.shape[0]}x{cov.shape[1]} covariance")
+            print(
+                f"[risk] {factor.name}: computed {cov.shape[0]}x{cov.shape[1]} covariance"
+            )
             pub.send_multipart(
                 [
                     TOPIC_COV,

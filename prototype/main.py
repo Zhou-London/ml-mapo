@@ -1,4 +1,4 @@
-"""Prototype runner: launch the four standalone modules as subprocesses and supervise them."""
+"""--- Import start ---"""
 
 from __future__ import annotations
 
@@ -8,11 +8,13 @@ import sys
 import time
 from pathlib import Path
 
+"""--- Import end ---"""
+
+"""--- Config start ---"""
 HERE = Path(__file__).resolve().parent
 PYTHON = sys.executable
 
-# Order matters: subscribers first, publisher (data) last, so SUB sockets are
-# already connected when the data PUB starts broadcasting.
+# Order matters: subscribers first, publisher (data) last
 MODULES: list[tuple[str, Path]] = [
     ("optimization", HERE / "optimization" / "main.py"),
     ("forecast", HERE / "forecast" / "main.py"),
@@ -21,6 +23,7 @@ MODULES: list[tuple[str, Path]] = [
 ]
 
 SHUTDOWN_TIMEOUT_S = 10.0
+"""--- Config end ---"""
 
 
 def spawn_modules() -> list[tuple[str, subprocess.Popen]]:
@@ -28,10 +31,6 @@ def spawn_modules() -> list[tuple[str, subprocess.Popen]]:
     procs: list[tuple[str, subprocess.Popen]] = []
     for name, path in MODULES:
         print(f"[runner] starting {name}: {path}")
-        # start_new_session=True puts the child in a fresh process group, so a
-        # SIGINT delivered to the foreground (the runner) does not also signal
-        # the child. The runner forwards a clean SIGTERM during shutdown
-        # instead, which the child handles via signal.default_int_handler.
         procs.append(
             (name, subprocess.Popen([PYTHON, str(path)], start_new_session=True))
         )
@@ -52,7 +51,9 @@ def terminate_all(procs: list[tuple[str, subprocess.Popen]]) -> None:
         try:
             p.wait(timeout=max(0.0, deadline - time.monotonic()))
         except subprocess.TimeoutExpired:
-            print(f"[runner] {name} did not exit after {SHUTDOWN_TIMEOUT_S:.0f}s, killing")
+            print(
+                f"[runner] {name} did not exit after {SHUTDOWN_TIMEOUT_S:.0f}s, killing"
+            )
             p.kill()
             try:
                 p.wait(timeout=2.0)

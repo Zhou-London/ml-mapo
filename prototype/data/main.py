@@ -1,4 +1,4 @@
-"""Data module: fetch OHLCV from yfinance into TimescaleDB and publish snapshots over ZMQ."""
+"""--- Import start ---"""
 
 from __future__ import annotations
 
@@ -23,11 +23,15 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
+"""--- Import end ---"""
+
+"""--- Config start ---"""
 DB_URL = "postgresql+psycopg2://postgres:password@localhost:6543/postgres"
-PUB_ADDR = "tcp://*:5555"
+PUB_ADDR = "tcp://*:5555"  # Define Port here
 TOPIC_OHLCV = b"OHLCV"
 
 TARGET_TICKERS = [
+    # Define targeting assets here
     "AAPL",
     "GOOG",
     "AMZN",
@@ -45,6 +49,7 @@ TARGET_TICKERS = [
 ]
 LOOKBACK_DAYS = 365
 PUBLISH_INTERVAL_S = 5.0
+"""--- Config end ---"""
 
 
 class Base(DeclarativeBase):
@@ -67,7 +72,7 @@ class OHLCV(Base):
 
 
 def setup_database():
-    """Connect, create the OHLCV table, and convert it to a hypertable (idempotent)."""
+    """Connet to TimescaleDB and initialize the `ohlcv` hypertable if it doesn't exist."""
     engine = create_engine(DB_URL, future=True)
     Base.metadata.create_all(engine)
     with engine.begin() as conn:
@@ -105,14 +110,7 @@ def _row_to_orm(ticker: str, ts, row) -> OHLCV:
 def find_missing_ranges(
     session, ticker: str, start: date, end: date
 ) -> list[tuple[date, date]]:
-    """Return inclusive (lo, hi) gaps inside [start, end] for which the cache has no rows.
-
-    Only the leading gap (before the earliest cached row) and the trailing gap
-    (after the latest cached row) are considered. Holes between two existing
-    trading days are ignored on purpose: yfinance never returns bars for
-    weekends or holidays, so an "interior hole" is normal and re-fetching it
-    would be wasteful.
-    """
+    """Return a list of (lo, hi) date tuples covering any missing-day gaps in [start, end]."""
     min_ts, max_ts = session.execute(
         select(func.min(OHLCV.ts), func.max(OHLCV.ts)).where(
             and_(OHLCV.ticker == ticker, OHLCV.ts >= start, OHLCV.ts <= end)
@@ -146,7 +144,7 @@ def fetch_range(ticker: str, lo: date, hi: date) -> list[OHLCV]:
 
 
 def fetch_and_store(engine, tickers: list[str], start: date, end: date) -> None:
-    """For each ticker, fill any missing-day gaps in [start, end] from yfinance."""
+    """For each ticker, fill any missing-day gaps in [start, end] from data source."""
     Session = sessionmaker(bind=engine, future=True)
     with Session() as session:
         for ticker in tickers:
@@ -213,14 +211,13 @@ def make_publisher() -> tuple[zmq.Context, zmq.Socket]:
 
 
 def main() -> None:
-    """Update the cache for the trailing 12 months, then loop forever broadcasting it."""
-    # Make SIGTERM raise KeyboardInterrupt so the finally block below runs
-    # and the PUB socket is closed cleanly before the process exits.
     signal.signal(signal.SIGTERM, signal.default_int_handler)
 
+    # Get the range of past 12 months
     end = date.today()
     start = end - timedelta(days=LOOKBACK_DAYS)
 
+    # Ensure the database is up to date, then load the snapshot to publish
     engine = setup_database()
     fetch_and_store(engine, TARGET_TICKERS, start, end)
     snapshot = load_snapshot(engine, TARGET_TICKERS, start, end)
@@ -232,7 +229,7 @@ def main() -> None:
     ctx, pub = make_publisher()
     print(f"[data] publisher bound to {PUB_ADDR}; tickers={list(snapshot.keys())}")
 
-    time.sleep(2.0)  # let subscribers connect before the first send
+    time.sleep(2.0)  # Wait for subscribers to connect before sending the first message
 
     payload = pickle.dumps(
         {
@@ -243,6 +240,7 @@ def main() -> None:
         }
     )
 
+    # Publish the snapshot
     try:
         while True:
             pub.send_multipart([TOPIC_OHLCV, payload])

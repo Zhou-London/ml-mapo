@@ -1,4 +1,4 @@
-"""Forecast module: subscribe to OHLCV, score alpha factors, publish combined alpha over ZMQ."""
+"""--- Import start ---"""
 
 from __future__ import annotations
 
@@ -11,14 +11,20 @@ import numpy as np
 import pandas as pd
 import zmq
 
+"""--- Import end ---"""
+
+"""--- Config start ---"""
+
 DATA_ADDR = "tcp://localhost:5555"
 PUB_ADDR = "tcp://*:5557"
 TOPIC_OHLCV = b"OHLCV"
 TOPIC_ALPHA = b"ALPHA"
 
+"""--- Config end ---"""
+
 
 def adj_close_panel(ohlcv: dict[str, pd.DataFrame]) -> pd.DataFrame:
-    """Stack per-ticker OHLCV frames into a single DataFrame of adjusted closes."""
+    """Pivots a dict of per-ticker OHLCV DataFrames into a single date & ticker adjusted-close panel."""
     return (
         pd.concat({t: df["adj_close"] for t, df in ohlcv.items()}, axis=1)
         .sort_index()
@@ -27,7 +33,7 @@ def adj_close_panel(ohlcv: dict[str, pd.DataFrame]) -> pd.DataFrame:
 
 
 class AlphaFactor(ABC):
-    """Interface: take {ticker: OHLCV} and return an annualized expected-return Series."""
+    """Alpha Factor Interface"""
 
     name: str = "alpha_factor"
 
@@ -36,17 +42,19 @@ class AlphaFactor(ABC):
 
 
 class NaiveMomentumAlpha(AlphaFactor):
-    """12-1 momentum: mean daily log-return over the trailing year minus the last month, annualized."""
+    """Example momentum factor"""
 
     name = "momentum_12_1"
 
-    def __init__(self, lookback: int = 252, skip: int = 21, trading_days: int = 252) -> None:
+    def __init__(
+        self, lookback: int = 252, skip: int = 21, trading_days: int = 252
+    ) -> None:
         self.lookback = lookback
         self.skip = skip
         self.trading_days = trading_days
 
     def score(self, ohlcv: dict[str, pd.DataFrame]) -> pd.Series:
-        """Compute per-ticker momentum scores from adjusted closes."""
+        """12-1 momentum, https://www.gurufocus.com/term/pchange-12-1m"""
         closes = adj_close_panel(ohlcv)
         returns = np.log(closes / closes.shift(1)).dropna()
         if self.skip > 0:
@@ -93,24 +101,24 @@ def make_sockets() -> tuple[zmq.Context, zmq.Socket, zmq.Socket]:
 
 
 def main() -> None:
-    """Run the forecast loop: receive a snapshot, score factors, combine, publish."""
-    # Make SIGTERM raise KeyboardInterrupt so the finally block below runs
-    # and the SUB/PUB sockets are closed cleanly before the process exits.
     signal.signal(signal.SIGTERM, signal.default_int_handler)
 
     ctx, sub, pub = make_sockets()
     print(f"[forecast] subscribed to {DATA_ADDR}; publishing on {PUB_ADDR}")
 
     factors: Iterable[AlphaFactor] = [NaiveMomentumAlpha()]
-    # IRs would normally come from a backtest; for the demo all factors are equal.
-    information_ratios = {f.name: 1.0 for f in factors}
+    information_ratios = {
+        f.name: 1.0 for f in factors
+    }  # IRs come from a backtest; for the demo all factors are equal.
 
     try:
         while True:
             _, payload = sub.recv_multipart()
             data = pickle.loads(payload)
+
             scores = {f.name: f.score(data["ohlcv"]) for f in factors}
             alpha = ir_weighted_combine(scores, information_ratios)
+
             print(f"[forecast] computed alpha for {len(alpha)} tickers")
             pub.send_multipart(
                 [
