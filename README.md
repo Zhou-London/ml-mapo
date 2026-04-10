@@ -3,15 +3,25 @@ Machine Learning Multi-Asset Portfolio Optimizer (ML-MAPO)
 
 @Philip Trealeaven, UCL Computer Science
 
-## About
-This is a research prototype of a classic ML approach.
+## Dependencies
+- Linux
+- TimescaleDB
+- Python (uv)
 
-## Environment
-- MacOS, or Linux. Windows not recommended.
-- Python with uv.
-```bash
-source .venv/bin/activate
+## Build
+Activate the Python uv environment:
+```zsh
+$ source .venv/bin/activate
 ```
 
-## License
-Apache
+(Optional) Alternatively, use `uv run` instead of `python`:
+```zsh
+$ uv run main.py
+``` 
+
+Install the python dependencies using `uv`. This will install packages including pytorch, pandas, etc.
+```zsh
+$ uv sync
+```
+
+Install PostgresSQL and TimescaleDB following the tutorial [here](https://github.com/timescale/timescaledb).
