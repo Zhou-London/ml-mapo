@@ -95,6 +95,7 @@ def print_weights(weights: pd.Series) -> None:
 
 
 def main() -> None:
+    """Main loop: wait for risk and forecast updates, then run MVO and print results."""
     signal.signal(signal.SIGTERM, signal.default_int_handler)
 
     ctx, sub_cov, sub_alpha, poller = make_sockets()

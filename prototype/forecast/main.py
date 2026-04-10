@@ -24,7 +24,8 @@ TOPIC_ALPHA = b"ALPHA"
 
 
 def adj_close_panel(ohlcv: dict[str, pd.DataFrame]) -> pd.DataFrame:
-    """Pivots a dict of per-ticker OHLCV DataFrames into a single date & ticker adjusted-close panel."""
+    """Pivots a dict of per-ticker OHLCV DataFrames into a single date
+    & ticker adjusted-close panel."""
     return (
         pd.concat({t: df["adj_close"] for t, df in ohlcv.items()}, axis=1)
         .sort_index()
@@ -38,7 +39,9 @@ class AlphaFactor(ABC):
     name: str = "alpha_factor"
 
     @abstractmethod
-    def score(self, ohlcv: dict[str, pd.DataFrame]) -> pd.Series: ...
+    def score(self, ohlcv: dict[str, pd.DataFrame]) -> pd.Series:
+        """Given a dict of per-ticker OHLCV DataFrames, return a
+        Series of alpha scores indexed by ticker."""
 
 
 class NaiveMomentumAlpha(AlphaFactor):
@@ -101,6 +104,7 @@ def make_sockets() -> tuple[zmq.Context, zmq.Socket, zmq.Socket]:
 
 
 def main() -> None:
+    """Main loop: receive OHLCV data, compute alpha, publish results."""
     signal.signal(signal.SIGTERM, signal.default_int_handler)
 
     ctx, sub, pub = make_sockets()

@@ -136,8 +136,8 @@ def fetch_and_store(
     end: date,
 ) -> None:
     """For each ticker, fill any missing-day gaps in [start, end] from the given adaptor."""
-    Session = sessionmaker(bind=engine, future=True)
-    with Session() as session:
+    session = sessionmaker(bind=engine, future=True)
+    with session() as session:
         for ticker in tickers:
             gaps = find_missing_ranges(session, ticker, start, end)
             if not gaps:
@@ -159,9 +159,9 @@ def load_snapshot(
     engine, tickers: list[str], start: date, end: date
 ) -> dict[str, pd.DataFrame]:
     """Read all cached OHLCV rows in [start, end] back into a {ticker: DataFrame} mapping."""
-    Session = sessionmaker(bind=engine, future=True)
+    session = sessionmaker(bind=engine, future=True)
     snapshot: dict[str, pd.DataFrame] = {}
-    with Session() as session:
+    with session() as session:
         for ticker in tickers:
             rows = (
                 session.execute(
@@ -202,6 +202,7 @@ def make_publisher() -> tuple[zmq.Context, zmq.Socket]:
 
 
 def main() -> None:
+    """Main entry point: ensure DB is up to date, load snapshot, and publish on a PUB socket."""
     signal.signal(signal.SIGTERM, signal.default_int_handler)
 
     # Get the range of past 12 months
