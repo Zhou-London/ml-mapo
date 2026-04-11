@@ -27,7 +27,7 @@ $ uv sync
 Install PostgresSQL and TimescaleDB following the tutorial [here](https://github.com/timescale/timescaledb). Connect to the database:
 
 ```zsh
-psql -h localhost -p 6543 -U postgres
+$ psql -h localhost -p 6543 -U postgres
 ```
 
 Run the prototype
