@@ -29,7 +29,7 @@ def mean_variance_optimize(
     risk_aversion: float = RISK_AVERSION,
     long_only: bool = LONG_ONLY,
 ) -> pd.Series:
-    """Classic MVO"""
+    """Run mean-variance optimization to compute portfolio weights from alpha and covariance."""
     tickers = [t for t in alpha.index if t in cov.index]
     if not tickers:
         raise ValueError("no overlap between alpha and covariance tickers")
@@ -88,7 +88,7 @@ def make_sockets() -> tuple[zmq.Context, zmq.Socket, zmq.Socket, zmq.Poller]:
 
 
 def print_weights(weights: pd.Series) -> None:
-    """Pretty-print MVO weights, largest first."""
+    """Print the optimized weights in a nice format."""
     print("[opt] MVO weights:")
     width = max((len(str(t)) for t in weights.index), default=6)
     for ticker, w in weights.sort_values(ascending=False).items():

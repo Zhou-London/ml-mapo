@@ -24,8 +24,8 @@ TOPIC_ALPHA = b"ALPHA"
 
 
 def adj_close_panel(ohlcv: dict[str, pd.DataFrame]) -> pd.DataFrame:
-    """Pivots a dict of per-ticker OHLCV DataFrames into a single date
-    & ticker adjusted-close panel."""
+    """Given a dict of per-ticker OHLCV DataFrames, return a single DataFrame
+    of adj_close prices indexed by date and ticker."""
     return (
         pd.concat({t: df["adj_close"] for t, df in ohlcv.items()}, axis=1)
         .sort_index()
@@ -113,7 +113,7 @@ def main() -> None:
     factors: Iterable[AlphaFactor] = [NaiveMomentumAlpha()]
     information_ratios = {
         f.name: 1.0 for f in factors
-    }  # IRs come from a backtest; for the demo all factors are equal.
+    }  # ! IRs come from a backtest; for the demo all factors are equal.
 
     try:
         while True:
