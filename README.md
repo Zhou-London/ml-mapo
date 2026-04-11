@@ -24,7 +24,11 @@ Install the python dependencies using `uv`. This will install packages including
 $ uv sync
 ```
 
-Install PostgresSQL and TimescaleDB following the tutorial [here](https://github.com/timescale/timescaledb).
+Install PostgresSQL and TimescaleDB following the tutorial [here](https://github.com/timescale/timescaledb). Connect to the database:
+
+```zsh
+psql -h localhost -p 6543 -U postgres
+```
 
 Run the prototype
 ```zsh
