@@ -139,7 +139,8 @@ INSTRUMENT_UNIVERSES: list[InstrumentUniverse] = [
 
 # Scope definitions
 LOOKBACK_DAYS = 365
-PUBLISH_INTERVAL_S = 5.0
+INITIAL_SUBSCRIBER_GRACE_S = 2.0
+CYCLE_LOG_EVERY_N = 50  # INFO every N idle cycles; DEBUG otherwise
 """--- Config end ---"""
 
 log = get_logger("data")
@@ -362,129 +363,80 @@ def find_missing_ranges(
     return gaps
 
 
-def fetch_range(
-    adaptor: DataSourceAdaptor,
-    instrument_id: int,
-    symbol: str,
-    lo: date,
-    hi: date,
-) -> list[OHLCV]:
-    """Fetch OHLCV rows for [lo, hi] from the adaptor and convert to ORM objects."""
-    df = adaptor.fetch_ohlcv(symbol, lo, hi)
-    if df.empty:
-        return []
-    return [_row_to_orm(instrument_id, ts, row) for ts, row in df.iterrows()]
-
-
-def _prompt_retry(label: str) -> bool:
-    """Prompt the user to retry after a fetch error.
-    Returns True if they want to retry, False to abort."""
-    if not sys.stdin.isatty():
-        log.warn("non-interactive; skipping retry", symbol=label)
-        return False
-    while True:
-        try:
-            answer = input(f"[data] {label}: retry fetch? [y/N] ").strip().lower()
-        except (EOFError, OSError):
-            return False
-        if answer in ("", "n", "no"):
-            return False
-        if answer in ("y", "yes"):
-            return True
-        log.warn("please answer 'y' or 'n'")
-
-
-def _fetch_with_retry(
-    adaptor: DataSourceAdaptor,
-    instrument_id: int,
-    symbol: str,
-    lo: date,
-    hi: date,
-    label: str,
-) -> list[OHLCV] | None:
-    """Fetch with retry loop: on error, prompt the user to retry or abort. Returns None if aborted."""
-    while True:
-        log.debug(
-            "fetching range",
-            symbol=label,
-            lo=lo.isoformat(),
-            hi=hi.isoformat(),
-            adaptor=adaptor.name,
-        )
-        try:
-            return fetch_range(adaptor, instrument_id, symbol, lo, hi)
-        except Exception as e:
-            log.exception(
-                "fetch failed",
-                symbol=label,
-                lo=lo.isoformat(),
-                hi=hi.isoformat(),
-                error_type=type(e).__name__,
-            )
-            if not _prompt_retry(label):
-                return None
-
-
 def fetch_and_store(
     engine,
     universe: InstrumentUniverse,
     start: date,
     end: date,
-) -> None:
-    """Fetch missing OHLCV rows for all tickers in this universe and upsert them into the DB."""
+) -> dict[str, int]:
+    """Batch-fetch every ticker that's missing any bar in [start, end] and upsert.
+
+    Single yfinance call parallelizes over tickers internally; for other
+    adaptors the base class fans out over a thread pool. Returns a stats dict
+    so callers can aggregate across universes into one cycle summary.
+    """
     session_factory = sessionmaker(bind=engine, future=True)
-    up_to_date = 0
-    upserted_total = 0
-    warned = 0
+    stats = {"cached": 0, "fetched": 0, "upserted": 0, "warnings": 0, "errors": 0}
     with session_factory() as session:
+        # (symbol, instrument_id, label, gaps)
+        to_fetch: list[tuple[str, int, str, list[tuple[date, date]]]] = []
         for symbol in universe.tickers:
             label = f"{universe.market}:{symbol}"
             instrument_id = ensure_instrument(session, universe, symbol)
             gaps = find_missing_ranges(session, instrument_id, start, end)
             if not gaps:
-                up_to_date += 1
-                continue
-
-            fetched = 0
-            aborted = False
-            for lo, hi in gaps:
-                rows = _fetch_with_retry(
-                    universe.adaptor, instrument_id, symbol, lo, hi, label
-                )
-                if rows is None:
-                    aborted = True
-                    break
-                for row in rows:
-                    session.merge(row)
-                fetched += len(rows)
-
-            if fetched == 0:
-                warned += 1
-                if aborted:
-                    log.warn("skipped after fetch error", symbol=label)
-                else:
-                    log.warn(
-                        "no rows returned; check ticker/market suffix",
-                        symbol=label,
-                        adaptor=universe.adaptor.name,
-                    )
+                stats["cached"] += 1
             else:
-                session.commit()
-                upserted_total += fetched
-                log.info(
-                    "upserted",
+                to_fetch.append((symbol, instrument_id, label, gaps))
+
+        if not to_fetch:
+            return stats
+
+        symbols = [s for s, _, _, _ in to_fetch]
+        # Union of all missing ranges — in steady state this collapses to the
+        # tail day only, so a tight cycle re-downloads just one bar per ticker.
+        batch_lo = min(g[0] for _, _, _, gs in to_fetch for g in gs)
+        batch_hi = max(g[1] for _, _, _, gs in to_fetch for g in gs)
+        log.debug(
+            "batch fetch",
+            market=universe.market,
+            symbols=len(symbols),
+            start=batch_lo.isoformat(),
+            end=batch_hi.isoformat(),
+            adaptor=universe.adaptor.name,
+        )
+        try:
+            result = universe.adaptor.fetch_ohlcv_many(symbols, batch_lo, batch_hi)
+        except Exception as e:
+            log.exception(
+                "batch fetch failed",
+                market=universe.market,
+                symbols=len(symbols),
+                error_type=type(e).__name__,
+            )
+            stats["errors"] += len(symbols)
+            return stats
+
+        stats["fetched"] = len(to_fetch)
+        for symbol, instrument_id, label, _gaps in to_fetch:
+            df = result.get(symbol)
+            if df is None or df.empty:
+                log.warn(
+                    "no rows returned; check ticker/market suffix",
                     symbol=label,
-                    rows=fetched,
-                    partial=aborted,
+                    adaptor=universe.adaptor.name,
                 )
-    log.info(
-        "fetch summary",
-        asset=universe.asset_class,
-        market=universe.market,
-        cached=up_to_date,
-        upserted_rows=upserted_total,
-        warnings=warned,
-    )
+                stats["warnings"] += 1
+                continue
+            rows = [
+                _row_to_orm(instrument_id, ts, row) for ts, row in df.iterrows()
+            ]
+            for row in rows:
+                session.merge(row)
+            stats["upserted"] += len(rows)
+            log.debug("upserted", symbol=label, rows=len(rows))
+        session.commit()
+    return stats
 
 
 def load_snapshot(
@@ -572,73 +524,98 @@ def make_publisher() -> tuple[zmq.Context, zmq.Socket]:
     return ctx, pub
 
 
+def _run_cycle(
+    engine,
+    universes: list[InstrumentUniverse],
+    start: date,
+    end: date,
+) -> tuple[dict[str, int], dict[str, pd.DataFrame]]:
+    """One pipeline pass: fetch-missing-then-snapshot. Returns (stats, snapshot)."""
+    total = {"cached": 0, "fetched": 0, "upserted": 0, "warnings": 0, "errors": 0}
+    for universe in universes:
+        stats = fetch_and_store(engine, universe, start, end)
+        for k, v in stats.items():
+            total[k] = total.get(k, 0) + v
+    snapshot = load_snapshot(engine, universes, start, end)
+    return total, snapshot
+
+
 def main() -> None:
-    """Main entry point: fetch missing data, load snapshot, and publish it in a loop."""
+    """Main entry point: tight fetch→snapshot→publish loop. No sleeps.
+
+    On each iteration we recompute the lookback window, ask the adaptor for
+    any missing bars, reload the snapshot, and publish. Idle cycles (nothing
+    to fetch) still republish so subscribers always have fresh data.
+    """
     signal.signal(signal.SIGTERM, signal.default_int_handler)
 
-    end = date.today()
-    start = end - timedelta(days=LOOKBACK_DAYS)
-    log.info(
-        "lookback window",
-        start=start.isoformat(),
-        end=end.isoformat(),
-        days=LOOKBACK_DAYS,
-    )
+    log.info("lookback configured", days=LOOKBACK_DAYS)
 
     engine = setup_database()
 
-    with log.pipeline("fetch", universes=len(INSTRUMENT_UNIVERSES)):
-        for universe in INSTRUMENT_UNIVERSES:
-            with log.pipeline(
-                "universe",
-                asset=universe.asset_class,
-                market=universe.market,
-                tickers=len(universe.tickers),
-                adaptor=universe.adaptor.name,
-            ):
-                fetch_and_store(engine, universe, start, end)
-
-    with log.pipeline("snapshot.load"):
-        snapshot: dict[str, pd.DataFrame] = load_snapshot(
-            engine, INSTRUMENT_UNIVERSES, start, end
+    with log.pipeline("bootstrap", universes=len(INSTRUMENT_UNIVERSES)):
+        end = date.today()
+        start = end - timedelta(days=LOOKBACK_DAYS)
+        log.info(
+            "window",
+            start=start.isoformat(),
+            end=end.isoformat(),
         )
-        log.info("snapshot loaded", assets=len(snapshot))
+        stats, snapshot = _run_cycle(engine, INSTRUMENT_UNIVERSES, start, end)
+        log.info(
+            "bootstrap fetch",
+            assets=len(snapshot),
+            **stats,
+        )
+        if stats["warnings"] or stats["errors"]:
+            log.warn(
+                "bootstrap had problems",
+                warnings=stats["warnings"],
+                errors=stats["errors"],
+            )
     if not snapshot:
-        log.warn("snapshot empty; nothing to publish")
-        return
+        log.error("bootstrap snapshot empty; aborting")
+        sys.exit(1)
 
     with log.pipeline("publish.bind", addr=PUB_ADDR):
         ctx, pub = make_publisher()
-        log.info("publisher bound", addr=PUB_ADDR, assets=len(snapshot))
-
-    time.sleep(2.0)  # Wait for subscribers to connect before the first message.
-
-    payload = pickle.dumps(
-        {
-            "tickers": list(snapshot.keys()),
-            "start": start.isoformat(),
-            "end": end.isoformat(),
-            "ohlcv": snapshot,
-        }
-    )
-    log.info(
-        "snapshot serialized",
-        bytes=len(payload),
-        assets=len(snapshot),
-    )
+    time.sleep(INITIAL_SUBSCRIBER_GRACE_S)
 
     seq = 0
     try:
         while True:
-            pub.send_multipart([TOPIC_OHLCV, payload])
             seq += 1
-            log.info(
-                "published",
-                topic=TOPIC_OHLCV.decode(),
-                seq=seq,
-                assets=len(snapshot),
+            t0 = time.monotonic()
+            end = date.today()
+            start = end - timedelta(days=LOOKBACK_DAYS)
+
+            stats, snapshot = _run_cycle(engine, INSTRUMENT_UNIVERSES, start, end)
+            if not snapshot:
+                log.warn("cycle snapshot empty", seq=seq)
+                continue
+
+            payload = pickle.dumps(
+                {
+                    "tickers": list(snapshot.keys()),
+                    "start": start.isoformat(),
+                    "end": end.isoformat(),
+                    "ohlcv": snapshot,
+                }
             )
-            time.sleep(PUBLISH_INTERVAL_S)
+            pub.send_multipart([TOPIC_OHLCV, payload])
+
+            dur_ms = (time.monotonic() - t0) * 1000.0
+            changed = stats["upserted"] > 0 or stats["warnings"] > 0 or stats["errors"] > 0
+            noteworthy = changed or seq == 1 or (seq % CYCLE_LOG_EVERY_N == 0)
+            emit = log.info if noteworthy else log.debug
+            emit(
+                "cycle",
+                seq=seq,
+                duration_ms=f"{dur_ms:.1f}",
+                assets=len(snapshot),
+                bytes=len(payload),
+                **stats,
+            )
     except KeyboardInterrupt:
         pass
     finally:
