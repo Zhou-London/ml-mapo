@@ -147,6 +147,44 @@ class Logger:
             for bln in block:
                 print(f"{gutter}{bln}", file=stream, flush=True)
 
+    def snapshot(self, name: str, data: dict[str, Any]) -> None:
+        """Emit a structured *snapshot* event.
+
+        A snapshot is a machine-consumable state sample (portfolio health,
+        covariance diagnostics, alpha distribution, etc.) that dashboards
+        render as a panel rather than as a log line. In JSON mode the
+        payload is attached verbatim under ``data`` with ``kind='snapshot'``
+        so consumers can split it from normal log traffic. In text mode we
+        emit a one-line summary so direct-terminal runs stay readable.
+        """
+        ts = _now()
+        if _JSON_MODE:
+            record = {
+                "ts": ts,
+                "level": "INFO",
+                "kind": "snapshot",
+                "module": self.module,
+                "stage": self.stage,
+                "snapshot": name,
+                "msg": f"snapshot:{name}",
+                "data": data,
+            }
+            print(json.dumps(record, default=str), file=sys.stdout, flush=True)
+            return
+        # Text mode: compact scalar summary, skip list/dict fields.
+        scalars = [
+            (k, v) for k, v in data.items() if not isinstance(v, (list, dict, tuple))
+        ]
+        kv = "  ".join(f"{k}={_format_value(v)}" for k, v in scalars[:8])
+        lvl_s = _paint("INFO ", _LEVEL_COLOR["INFO"])
+        mod_s = _paint(f"{self.module:<8}", _MODULE_COLOR.get(self.module, ""))
+        stage_s = _paint(f"{self.stage:<22}", _MODULE_COLOR.get(self.module, ""))
+        head = _paint(f"snapshot:{name}", "\033[1m")
+        line = f"{ts}  {lvl_s}  {mod_s}  {stage_s}  {head}"
+        if kv:
+            line += f"  {kv}"
+        print(line, file=sys.stdout, flush=True)
+
     def table(
         self,
         msg: str,
