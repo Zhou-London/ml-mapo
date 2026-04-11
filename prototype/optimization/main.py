@@ -90,8 +90,9 @@ def make_sockets() -> tuple[zmq.Context, zmq.Socket, zmq.Socket, zmq.Poller]:
 def print_weights(weights: pd.Series) -> None:
     """Pretty-print MVO weights, largest first."""
     print("[opt] MVO weights:")
+    width = max((len(str(t)) for t in weights.index), default=6)
     for ticker, w in weights.sort_values(ascending=False).items():
-        print(f"  {ticker:>6}  {w:+.4f}")
+        print(f"  {ticker:>{width}}  {w:+.4f}")
 
 
 def main() -> None:
