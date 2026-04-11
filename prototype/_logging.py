@@ -58,7 +58,7 @@ def _format_value(v: Any) -> str:
     if isinstance(v, float):
         return f"{v:.4g}"
     s = str(v)
-    if any(c in s for c in " \t\"="):
+    if any(c in s for c in ' \t"='):
         return json.dumps(s)
     return s
 
@@ -178,9 +178,7 @@ class Logger:
                     widths[i] = len(c)
         lines: list[str] = []
         if headers is not None:
-            lines.append(
-                "  ".join(h.ljust(widths[i]) for i, h in enumerate(headers))
-            )
+            lines.append("  ".join(h.ljust(widths[i]) for i, h in enumerate(headers)))
             lines.append("  ".join("-" * widths[i] for i in range(cols)))
         for r in str_rows:
             padded = []
