@@ -7,8 +7,11 @@ import sys
 import time
 from dataclasses import dataclass, field
 from datetime import date, timedelta
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import pandas as pd
 import zmq
+from _logging import get_logger, run_module
 from adaptors import DataSourceAdaptor, YfAdaptor
 from sqlalchemy import (
     BigInteger,
@@ -138,6 +141,8 @@ LOOKBACK_DAYS = 365
 PUBLISH_INTERVAL_S = 5.0
 """--- Config end ---"""
 
+log = get_logger("data")
+
 
 class Base(DeclarativeBase):
     pass
@@ -220,29 +225,42 @@ def _schema_matches(engine) -> bool:
 
 def setup_database():
     """Create tables if they don't exist or if the schema doesn't match, and return an engine connected to the DB."""
-    engine = create_engine(DB_URL, future=True)
-    try:
-        if not _schema_matches(engine):
-            print("[data] schema mismatch detected; rebuilding tables")
-            with engine.begin() as conn:
-                for table in reversed(Base.metadata.sorted_tables):
-                    conn.execute(text(f"DROP TABLE IF EXISTS {table.name} CASCADE;"))
-        Base.metadata.create_all(engine)
-        with engine.begin() as conn:
-            conn.execute(
-                text(
-                    "SELECT create_hypertable('ohlcv', 'ts', "
-                    "if_not_exists => TRUE, migrate_data => TRUE);"
+    with log.pipeline("db.setup", url=DB_URL):
+        engine = create_engine(DB_URL, future=True)
+        try:
+            if not _schema_matches(engine):
+                log.warn(
+                    "schema mismatch; rebuilding",
+                    tables=[t.name for t in Base.metadata.sorted_tables],
                 )
+                with engine.begin() as conn:
+                    for table in reversed(Base.metadata.sorted_tables):
+                        conn.execute(
+                            text(f"DROP TABLE IF EXISTS {table.name} CASCADE;")
+                        )
+            else:
+                log.info(
+                    "schema ok",
+                    tables=len(Base.metadata.sorted_tables),
+                )
+            Base.metadata.create_all(engine)
+            with engine.begin() as conn:
+                conn.execute(
+                    text(
+                        "SELECT create_hypertable('ohlcv', 'ts', "
+                        "if_not_exists => TRUE, migrate_data => TRUE);"
+                    )
+                )
+            log.info("hypertable ready", table="ohlcv")
+        except OperationalError as e:
+            log.error(
+                "cannot connect to database",
+                url=DB_URL,
+                error_type=type(e.orig).__name__,
+                error=str(e.orig).splitlines()[0] if str(e.orig) else "",
+                hint="is TimescaleDB running and reachable on that host/port?",
             )
-    except OperationalError as e:
-        print(
-            f"[data] ERROR: cannot connect to database at {DB_URL}\n"
-            f"[data]   reason: {e.orig}\n"
-            f"[data]   hint:   is TimescaleDB running and reachable on that host/port?",
-            file=sys.stderr,
-        )
-        sys.exit(1)
+            sys.exit(1)
     return engine
 
 
@@ -361,10 +379,7 @@ def _prompt_retry(label: str) -> bool:
     """Prompt the user to retry after a fetch error.
     Returns True if they want to retry, False to abort."""
     if not sys.stdin.isatty():
-        print(
-            f"[data] {label}: non-interactive session, skipping retry",
-            file=sys.stderr,
-        )
+        log.warn("non-interactive; skipping retry", symbol=label)
         return False
     while True:
         try:
@@ -375,7 +390,7 @@ def _prompt_retry(label: str) -> bool:
             return False
         if answer in ("y", "yes"):
             return True
-        print("[data] please answer 'y' or 'n'", file=sys.stderr)
+        log.warn("please answer 'y' or 'n'")
 
 
 def _fetch_with_retry(
@@ -388,13 +403,22 @@ def _fetch_with_retry(
 ) -> list[OHLCV] | None:
     """Fetch with retry loop: on error, prompt the user to retry or abort. Returns None if aborted."""
     while True:
-        print(f"[data] {label}: fetching {lo} → {hi} via {adaptor.name}")
+        log.debug(
+            "fetching range",
+            symbol=label,
+            lo=lo.isoformat(),
+            hi=hi.isoformat(),
+            adaptor=adaptor.name,
+        )
         try:
             return fetch_range(adaptor, instrument_id, symbol, lo, hi)
         except Exception as e:
-            print(
-                f"[data] ERROR: {label}: fetch failed " f"({type(e).__name__}: {e})",
-                file=sys.stderr,
+            log.exception(
+                "fetch failed",
+                symbol=label,
+                lo=lo.isoformat(),
+                hi=hi.isoformat(),
+                error_type=type(e).__name__,
             )
             if not _prompt_retry(label):
                 return None
@@ -408,13 +432,16 @@ def fetch_and_store(
 ) -> None:
     """Fetch missing OHLCV rows for all tickers in this universe and upsert them into the DB."""
     session_factory = sessionmaker(bind=engine, future=True)
+    up_to_date = 0
+    upserted_total = 0
+    warned = 0
     with session_factory() as session:
         for symbol in universe.tickers:
             label = f"{universe.market}:{symbol}"
             instrument_id = ensure_instrument(session, universe, symbol)
             gaps = find_missing_ranges(session, instrument_id, start, end)
             if not gaps:
-                print(f"[data] {label}: cache up to date")
+                up_to_date += 1
                 continue
 
             fetched = 0
@@ -431,21 +458,32 @@ def fetch_and_store(
                 fetched += len(rows)
 
             if fetched == 0:
+                warned += 1
                 if aborted:
-                    print(
-                        f"[data] WARNING: {label}: skipped after fetch error",
-                        file=sys.stderr,
-                    )
+                    log.warn("skipped after fetch error", symbol=label)
                 else:
-                    print(
-                        f"[data] WARNING: {label}: no rows returned from "
-                        f"{universe.adaptor.name} — check ticker symbol / market suffix",
-                        file=sys.stderr,
+                    log.warn(
+                        "no rows returned; check ticker/market suffix",
+                        symbol=label,
+                        adaptor=universe.adaptor.name,
                     )
             else:
                 session.commit()
-                suffix = " (partial, after fetch error)" if aborted else ""
-                print(f"[data] {label}: upserted {fetched} row(s){suffix}")
+                upserted_total += fetched
+                log.info(
+                    "upserted",
+                    symbol=label,
+                    rows=fetched,
+                    partial=aborted,
+                )
+    log.info(
+        "fetch summary",
+        asset=universe.asset_class,
+        market=universe.market,
+        cached=up_to_date,
+        upserted_rows=upserted_total,
+        warnings=warned,
+    )
 
 
 def load_snapshot(
@@ -490,20 +528,22 @@ def load_snapshot(
                     continue
                 label = f"{universe.market}:{symbol}"
                 if len(rows) < 2:
-                    print(
-                        f"[data] WARNING: {label}: only {len(rows)} bar(s) "
-                        f"in [{start}, {end}] — need ≥2 to form a return, "
-                        f"excluding from snapshot",
-                        file=sys.stderr,
+                    log.warn(
+                        "too few bars; excluding from snapshot",
+                        symbol=label,
+                        bars=len(rows),
+                        window_start=start.isoformat(),
+                        window_end=end.isoformat(),
+                        reason="need >=2 to form a return",
                     )
                     continue
                 closes = [r.adj_close for r in rows]
                 if min(closes) == max(closes):
-                    print(
-                        f"[data] WARNING: {label}: constant close price across "
-                        f"{len(rows)} bar(s) — would make covariance singular, "
-                        f"excluding from snapshot",
-                        file=sys.stderr,
+                    log.warn(
+                        "constant close; excluding from snapshot",
+                        symbol=label,
+                        bars=len(rows),
+                        reason="would make covariance singular",
                     )
                     continue
                 snapshot[label] = pd.DataFrame(
@@ -535,32 +575,42 @@ def main() -> None:
     """Main entry point: fetch missing data, load snapshot, and publish it in a loop."""
     signal.signal(signal.SIGTERM, signal.default_int_handler)
 
-    # Get the range of past 12 months
     end = date.today()
     start = end - timedelta(days=LOOKBACK_DAYS)
+    log.info(
+        "lookback window",
+        start=start.isoformat(),
+        end=end.isoformat(),
+        days=LOOKBACK_DAYS,
+    )
 
-    # Connect to database
     engine = setup_database()
 
-    # Fill missing days for every instrument universe
-    for universe in INSTRUMENT_UNIVERSES:
-        print(
-            f"[data] universe {universe.asset_class}/{universe.market}: "
-            f"{len(universe.tickers)} ticker(s) via {universe.adaptor.name}"
-        )
-        fetch_and_store(engine, universe, start, end)
+    with log.pipeline("fetch", universes=len(INSTRUMENT_UNIVERSES)):
+        for universe in INSTRUMENT_UNIVERSES:
+            with log.pipeline(
+                "universe",
+                asset=universe.asset_class,
+                market=universe.market,
+                tickers=len(universe.tickers),
+                adaptor=universe.adaptor.name,
+            ):
+                fetch_and_store(engine, universe, start, end)
 
-    snapshot: dict[str, pd.DataFrame] = load_snapshot(
-        engine, INSTRUMENT_UNIVERSES, start, end
-    )
+    with log.pipeline("snapshot.load"):
+        snapshot: dict[str, pd.DataFrame] = load_snapshot(
+            engine, INSTRUMENT_UNIVERSES, start, end
+        )
+        log.info("snapshot loaded", assets=len(snapshot))
     if not snapshot:
-        print("[data] snapshot is empty; nothing to publish")
+        log.warn("snapshot empty; nothing to publish")
         return
 
-    ctx, pub = make_publisher()
-    print(f"[data] publisher bound to {PUB_ADDR}; assets={list(snapshot.keys())}")
+    with log.pipeline("publish.bind", addr=PUB_ADDR):
+        ctx, pub = make_publisher()
+        log.info("publisher bound", addr=PUB_ADDR, assets=len(snapshot))
 
-    time.sleep(2.0)  # Wait for subscribers to connect before sending the first message
+    time.sleep(2.0)  # Wait for subscribers to connect before the first message.
 
     payload = pickle.dumps(
         {
@@ -570,20 +620,31 @@ def main() -> None:
             "ohlcv": snapshot,
         }
     )
+    log.info(
+        "snapshot serialized",
+        bytes=len(payload),
+        assets=len(snapshot),
+    )
 
-    # Publish the snapshot
+    seq = 0
     try:
         while True:
             pub.send_multipart([TOPIC_OHLCV, payload])
-            print("[data] published OHLCV snapshot")
+            seq += 1
+            log.info(
+                "published",
+                topic=TOPIC_OHLCV.decode(),
+                seq=seq,
+                assets=len(snapshot),
+            )
             time.sleep(PUBLISH_INTERVAL_S)
     except KeyboardInterrupt:
         pass
     finally:
-        print("[data] closing sockets")
+        log.info("closing sockets", published=seq)
         pub.close(linger=0)
         ctx.term()
 
 
 if __name__ == "__main__":
-    main()
+    run_module("data", main)

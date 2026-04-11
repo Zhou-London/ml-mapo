@@ -4,12 +4,18 @@ from __future__ import annotations
 
 import pickle
 import signal
+import sys
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import numpy as np
 import pandas as pd
 import zmq
+
+from _logging import get_logger, run_module
 
 """--- Import end ---"""
 
@@ -21,6 +27,8 @@ TOPIC_OHLCV = b"OHLCV"
 TOPIC_ALPHA = b"ALPHA"
 
 """--- Config end ---"""
+
+log = get_logger("forecast")
 
 
 def adj_close_panel(ohlcv: dict[str, pd.DataFrame]) -> pd.DataFrame:
@@ -107,43 +115,64 @@ def main() -> None:
     """Main loop: receive OHLCV data, compute alpha, publish results."""
     signal.signal(signal.SIGTERM, signal.default_int_handler)
 
-    ctx, sub, pub = make_sockets()
-    print(f"[forecast] subscribed to {DATA_ADDR}; publishing on {PUB_ADDR}")
+    with log.pipeline("socket.bind", sub=DATA_ADDR, pub=PUB_ADDR):
+        ctx, sub, pub = make_sockets()
 
     factors: Iterable[AlphaFactor] = [NaiveMomentumAlpha()]
     information_ratios = {
         f.name: 1.0 for f in factors
     }  # ! IRs come from a backtest; for the demo all factors are equal.
+    log.info(
+        "factors configured",
+        factors=[f.name for f in factors],
+        information_ratios=information_ratios,
+    )
 
+    seq = 0
     try:
         while True:
             _, payload = sub.recv_multipart()
-            data = pickle.loads(payload)
-
-            scores = {f.name: f.score(data["ohlcv"]) for f in factors}
-            alpha = ir_weighted_combine(scores, information_ratios)
-
-            print(f"[forecast] computed alpha for {len(alpha)} tickers")
-            pub.send_multipart(
-                [
-                    TOPIC_ALPHA,
-                    pickle.dumps(
-                        {
-                            "factors": list(scores.keys()),
-                            "tickers": list(alpha.index),
-                            "alpha": alpha,
-                        }
-                    ),
-                ]
-            )
+            seq += 1
+            with log.pipeline("alpha.compute", seq=seq):
+                try:
+                    data = pickle.loads(payload)
+                    scores = {f.name: f.score(data["ohlcv"]) for f in factors}
+                    alpha = ir_weighted_combine(scores, information_ratios)
+                except Exception as e:
+                    log.exception(
+                        "alpha computation failed",
+                        error_type=type(e).__name__,
+                        seq=seq,
+                    )
+                    continue
+                log.info(
+                    "alpha ready",
+                    tickers=len(alpha),
+                    factors=list(scores.keys()),
+                    mean=float(alpha.mean()),
+                    std=float(alpha.std(ddof=0)),
+                )
+                pub.send_multipart(
+                    [
+                        TOPIC_ALPHA,
+                        pickle.dumps(
+                            {
+                                "factors": list(scores.keys()),
+                                "tickers": list(alpha.index),
+                                "alpha": alpha,
+                            }
+                        ),
+                    ]
+                )
+                log.info("published", topic=TOPIC_ALPHA.decode(), seq=seq)
     except KeyboardInterrupt:
         pass
     finally:
-        print("[forecast] closing sockets")
+        log.info("closing sockets", processed=seq)
         sub.close(linger=0)
         pub.close(linger=0)
         ctx.term()
 
 
 if __name__ == "__main__":
-    main()
+    run_module("forecast", main)
