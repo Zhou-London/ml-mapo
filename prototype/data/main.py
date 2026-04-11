@@ -32,20 +32,56 @@ TOPIC_OHLCV = b"OHLCV"
 
 TARGET_TICKERS = [
     # Define targeting assets here
-    "AAPL",
-    "GOOG",
-    "AMZN",
-    "MSFT",
-    "TSLA",
-    "META",
     "NVDA",
-    "JPM",
-    "PLTR",
-    "INTC",
-    "AMD",
-    "NFLX",
+    "AAPL",
+    "MSFT",
+    "AMZN",
+    "GOOGL",
+    "GOOG",
+    "AVGO",
+    "META",
+    "TSLA",
+    "WMT",
+    "ASML",
     "MU",
-    "RKLB",
+    "COST",
+    "NFLX",
+    "AMD",
+    "LRCX",
+    "CSCO",
+    "AMAT",
+    "INTC",
+    "PLTR",
+    "LIN",
+    "KLAC",
+    "TMUS",
+    "PEP",
+    "TXN",
+    "AMGN",
+    "GILD",
+    "ADI",
+    "ISRG",
+    "ARM",
+    "HON",
+    "SHOP",
+    "PDD",
+    "BKNG",
+    "QCOM",
+    "APP",
+    "PANW",
+    "WDC",
+    "STX",
+    "MRVL",
+    "VRTX",
+    "SBUX",
+    "CEG",
+    "CMCSA",
+    "INTU",
+    "CRWD",
+    "MAR",
+    "ADBE",
+    "MELI",
+    "REGN",
 ]
 LOOKBACK_DAYS = 365
 PUBLISH_INTERVAL_S = 5.0
@@ -220,12 +256,16 @@ def main() -> None:
     end = date.today()
     start = end - timedelta(days=LOOKBACK_DAYS)
 
-    # Ensure the database is up to date, then load the snapshot to publish
+    # Connect to database
     engine = setup_database()
+
+    # Fill missing days in the database
     adaptor: DataSourceAdaptor = YfAdaptor()
     fetch_and_store(engine, adaptor, TARGET_TICKERS, start, end)
-    snapshot = load_snapshot(engine, TARGET_TICKERS, start, end)
 
+    snapshot: dict[str, pd.DataFrame] = load_snapshot(
+        engine, TARGET_TICKERS, start, end
+    )
     if not snapshot:
         print("[data] snapshot is empty; nothing to publish")
         return
