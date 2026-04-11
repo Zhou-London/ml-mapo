@@ -205,25 +205,29 @@ class OHLCV(Base):
     volume: Mapped[int] = mapped_column(BigInteger, nullable=False)
 
 
+def _schema_matches(engine) -> bool:
+    """Check whether the existing DB schema matches the ORM models (all tables exist with expected columns)."""
+    inspector = inspect(engine)
+    existing = set(inspector.get_table_names())
+    for table in Base.metadata.sorted_tables:
+        if table.name not in existing:
+            return False
+        expected = {c.name for c in table.columns}
+        actual = {c["name"] for c in inspector.get_columns(table.name)}
+        if expected != actual:
+            return False
+    return True
+
+
 def setup_database():
-    """Connect to the database, create tables if needed, and convert `ohlcv` to
-    a hypertable if it looks like an old legacy schema."""
+    """Create tables if they don't exist or if the schema doesn't match, and return an engine connected to the DB."""
     engine = create_engine(DB_URL, future=True)
     try:
-        inspector = inspect(engine)
-        needs_rebuild = False
-        if inspector.has_table("ohlcv"):
-            cols = {c["name"] for c in inspector.get_columns("ohlcv")}
-            if "instrument_id" not in cols:
-                needs_rebuild = True
-        if needs_rebuild:
-            print(
-                "[data] legacy ohlcv schema detected; rebuilding as CTI "
-                "instruments + detail tables"
-            )
+        if not _schema_matches(engine):
+            print("[data] schema mismatch detected; rebuilding tables")
             with engine.begin() as conn:
-                for tbl in ("ohlcv", "equity_details", "fx_details", "instruments"):
-                    conn.execute(text(f"DROP TABLE IF EXISTS {tbl} CASCADE;"))
+                for table in reversed(Base.metadata.sorted_tables):
+                    conn.execute(text(f"DROP TABLE IF EXISTS {table.name} CASCADE;"))
         Base.metadata.create_all(engine)
         with engine.begin() as conn:
             conn.execute(
@@ -244,7 +248,7 @@ def setup_database():
 
 
 def _parse_fx_symbol(symbol: str) -> tuple[str, str]:
-    """Split a yfinance FX symbol ('EURUSD=X') into (base, quote) ISO codes."""
+    """Parse a FX symbol like 'EURUSD=X' into (base_currency, quote_currency)."""
     core = symbol.removesuffix("=X")
     if len(core) != 6:
         raise ValueError(
@@ -255,7 +259,7 @@ def _parse_fx_symbol(symbol: str) -> tuple[str, str]:
 
 
 def _make_detail(universe: InstrumentUniverse, symbol: str):
-    """Build the asset-class-specific detail row for a new instrument."""
+    """Create an asset-class-specific detail row for this ticker."""
     if universe.asset_class == ASSET_CLASS_EQUITY:
         return EquityDetail()
     if universe.asset_class == ASSET_CLASS_FX:
@@ -355,7 +359,8 @@ def fetch_range(
 
 
 def _prompt_retry(label: str) -> bool:
-    """Prompt the user to retry after a fetch error. Returns True if they want to retry, False to abort."""
+    """Prompt the user to retry after a fetch error.
+    Returns True if they want to retry, False to abort."""
     if not sys.stdin.isatty():
         print(
             f"[data] {label}: non-interactive session, skipping retry",
