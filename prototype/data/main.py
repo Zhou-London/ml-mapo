@@ -14,7 +14,10 @@ from sqlalchemy import (
     BigInteger,
     Date,
     Float,
+    ForeignKey,
+    Integer,
     String,
+    UniqueConstraint,
     and_,
     create_engine,
     func,
@@ -28,21 +31,27 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 """--- Import end ---"""
 
 """--- Config start ---"""
+# DB Connection
 DB_URL = "postgresql+psycopg2://postgres:password@localhost:6543/postgres"
-PUB_ADDR = "tcp://*:5555"  # Define Port here
+PUB_ADDR = "tcp://*:5555"
 TOPIC_OHLCV = b"OHLCV"
+
+# Asset class definitions
+ASSET_CLASS_EQUITY = "EQUITY"
+ASSET_CLASS_FX = "FX"
 
 
 @dataclass(frozen=True)
-class MarketUniverse:
-    """Defines a market universe to fetch and publish."""
+class InstrumentUniverse:
+    """Defines a set of tradable instruments by asset class, market, and ticker symbol,
+    along with the adaptor to fetch their OHLCV data from."""
 
+    asset_class: str
     market: str
     adaptor: DataSourceAdaptor
     tickers: list[str] = field(default_factory=list)
 
 
-# US equities
 US_EQUITIES = [
     "NVDA",
     "AAPL",
@@ -95,14 +104,37 @@ US_EQUITIES = [
     "MELI",
     "REGN",
 ]
-
 UK_EQUITIES = ["HSBA.L"]
-
-MARKET_UNIVERSES: list[MarketUniverse] = [
-    MarketUniverse(market="US", adaptor=YfAdaptor(), tickers=US_EQUITIES),
-    MarketUniverse(market="UK", adaptor=YfAdaptor(), tickers=UK_EQUITIES),
+FX_PAIRS = [
+    "EURUSD=X",
+    "GBPUSD=X",
+    "USDJPY=X",
+    "AUDUSD=X",
+    "USDCAD=X",
 ]
 
+INSTRUMENT_UNIVERSES: list[InstrumentUniverse] = [
+    InstrumentUniverse(
+        asset_class=ASSET_CLASS_EQUITY,
+        market="US",
+        adaptor=YfAdaptor(),
+        tickers=US_EQUITIES,
+    ),
+    InstrumentUniverse(
+        asset_class=ASSET_CLASS_EQUITY,
+        market="UK",
+        adaptor=YfAdaptor(),
+        tickers=UK_EQUITIES,
+    ),
+    InstrumentUniverse(
+        asset_class=ASSET_CLASS_FX,
+        market="FX",
+        adaptor=YfAdaptor(),
+        tickers=FX_PAIRS,
+    ),
+]
+
+# Scope definitions
 LOOKBACK_DAYS = 365
 PUBLISH_INTERVAL_S = 5.0
 """--- Config end ---"""
@@ -112,13 +144,58 @@ class Base(DeclarativeBase):
     pass
 
 
+class Instrument(Base):
+    """Core CTI table storing one row per unique (asset_class, market, symbol) combination."""
+
+    __tablename__ = "instruments"
+
+    instrument_id: Mapped[int] = mapped_column(
+        Integer, primary_key=True, autoincrement=True
+    )
+    asset_class: Mapped[str] = mapped_column(String(16), nullable=False)
+    market: Mapped[str] = mapped_column(String(16), nullable=False)
+    symbol: Mapped[str] = mapped_column(String(32), nullable=False)
+    name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    currency: Mapped[str | None] = mapped_column(String(8), nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("asset_class", "market", "symbol", name="uq_instruments_key"),
+    )
+
+
+class EquityDetail(Base):
+    """Equity-specific extension; minimal for now, ready to grow (exchange, sector, ISIN…)."""
+
+    __tablename__ = "equity_details"
+
+    instrument_id: Mapped[int] = mapped_column(
+        ForeignKey("instruments.instrument_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+
+
+class FxDetail(Base):
+    """FX-pair-specific extension storing the base/quote currency split."""
+
+    __tablename__ = "fx_details"
+
+    instrument_id: Mapped[int] = mapped_column(
+        ForeignKey("instruments.instrument_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    base_currency: Mapped[str] = mapped_column(String(8), nullable=False)
+    quote_currency: Mapped[str] = mapped_column(String(8), nullable=False)
+
+
 class OHLCV(Base):
-    """One row per (market, ticker, trading day). `ts` is the hypertable time column."""
+    """Daily OHLCV bar keyed by (instrument_id, ts). `ts` is the hypertable partition column."""
 
     __tablename__ = "ohlcv"
 
-    market: Mapped[str] = mapped_column(String(16), primary_key=True)
-    ticker: Mapped[str] = mapped_column(String(32), primary_key=True)
+    instrument_id: Mapped[int] = mapped_column(
+        ForeignKey("instruments.instrument_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
     ts: Mapped[date] = mapped_column(Date, primary_key=True)
     open: Mapped[float] = mapped_column(Float, nullable=False)
     high: Mapped[float] = mapped_column(Float, nullable=False)
@@ -129,15 +206,24 @@ class OHLCV(Base):
 
 
 def setup_database():
-    """Connect to TimescaleDB and initialize the `ohlcv` hypertable if it doesn't exist."""
+    """Connect to the database, create tables if needed, and convert `ohlcv` to
+    a hypertable if it looks like an old legacy schema."""
     engine = create_engine(DB_URL, future=True)
     try:
         inspector = inspect(engine)
+        needs_rebuild = False
         if inspector.has_table("ohlcv"):
             cols = {c["name"] for c in inspector.get_columns("ohlcv")}
-            if "market" not in cols:
-                with engine.begin() as conn:
-                    conn.execute(text("DROP TABLE ohlcv CASCADE;"))
+            if "instrument_id" not in cols:
+                needs_rebuild = True
+        if needs_rebuild:
+            print(
+                "[data] legacy ohlcv schema detected; rebuilding as CTI "
+                "instruments + detail tables"
+            )
+            with engine.begin() as conn:
+                for tbl in ("ohlcv", "equity_details", "fx_details", "instruments"):
+                    conn.execute(text(f"DROP TABLE IF EXISTS {tbl} CASCADE;"))
         Base.metadata.create_all(engine)
         with engine.begin() as conn:
             conn.execute(
@@ -157,11 +243,68 @@ def setup_database():
     return engine
 
 
-def _row_to_orm(market: str, ticker: str, ts, row) -> OHLCV:
-    """Build one OHLCV ORM instance from a canonical OHLCV index/row pair."""
+def _parse_fx_symbol(symbol: str) -> tuple[str, str]:
+    """Split a yfinance FX symbol ('EURUSD=X') into (base, quote) ISO codes."""
+    core = symbol.removesuffix("=X")
+    if len(core) != 6:
+        raise ValueError(
+            f"cannot parse FX symbol {symbol!r}: expected 6-letter base+quote "
+            "(yfinance format like 'EURUSD=X')"
+        )
+    return core[:3], core[3:]
+
+
+def _make_detail(universe: InstrumentUniverse, symbol: str):
+    """Build the asset-class-specific detail row for a new instrument."""
+    if universe.asset_class == ASSET_CLASS_EQUITY:
+        return EquityDetail()
+    if universe.asset_class == ASSET_CLASS_FX:
+        base, quote = _parse_fx_symbol(symbol)
+        return FxDetail(base_currency=base, quote_currency=quote)
+    raise ValueError(f"unknown asset_class: {universe.asset_class!r}")
+
+
+def ensure_instrument(session, universe: InstrumentUniverse, symbol: str) -> int:
+    """Ensure an `instruments` row (plus the asset-class detail row) exists for this ticker,
+    and return its instrument_id."""
+    existing = session.execute(
+        select(Instrument).where(
+            and_(
+                Instrument.asset_class == universe.asset_class,
+                Instrument.market == universe.market,
+                Instrument.symbol == symbol,
+            )
+        )
+    ).scalar_one_or_none()
+    if existing is not None:
+        return existing.instrument_id
+
+    # Quote currency is deterministic for FX; unknown for equities for now.
+    currency: str | None = None
+    if universe.asset_class == ASSET_CLASS_FX:
+        _, currency = _parse_fx_symbol(symbol)
+
+    instrument = Instrument(
+        asset_class=universe.asset_class,
+        market=universe.market,
+        symbol=symbol,
+        currency=currency,
+    )
+    session.add(instrument)
+    session.flush()
+
+    detail = _make_detail(universe, symbol)
+    detail.instrument_id = instrument.instrument_id
+    session.add(detail)
+    session.commit()
+    return instrument.instrument_id
+
+
+def _row_to_orm(instrument_id: int, ts, row) -> OHLCV:
+    """Convert a OHLCV row to an ORM object,
+    filling in the instrument_id and parsing types."""
     return OHLCV(
-        market=market,
-        ticker=ticker,
+        instrument_id=instrument_id,
         ts=ts.date() if hasattr(ts, "date") else ts,
         open=float(row["Open"]),
         high=float(row["High"]),
@@ -173,14 +316,13 @@ def _row_to_orm(market: str, ticker: str, ts, row) -> OHLCV:
 
 
 def find_missing_ranges(
-    session, market: str, ticker: str, start: date, end: date
+    session, instrument_id: int, start: date, end: date
 ) -> list[tuple[date, date]]:
-    """Return a list of (lo, hi) date tuples covering any missing-day gaps in [start, end]."""
+    """Return (lo, hi) date tuples covering missing-day gaps in [start, end] for an instrument."""
     min_ts, max_ts = session.execute(
         select(func.min(OHLCV.ts), func.max(OHLCV.ts)).where(
             and_(
-                OHLCV.market == market,
-                OHLCV.ticker == ticker,
+                OHLCV.instrument_id == instrument_id,
                 OHLCV.ts >= start,
                 OHLCV.ts <= end,
             )
@@ -199,21 +341,21 @@ def find_missing_ranges(
 
 
 def fetch_range(
-    market: str,
     adaptor: DataSourceAdaptor,
-    ticker: str,
+    instrument_id: int,
+    symbol: str,
     lo: date,
     hi: date,
 ) -> list[OHLCV]:
-    """Pull [lo, hi] from the given data source adaptor and return ORM rows (empty if none)."""
-    df = adaptor.fetch_ohlcv(ticker, lo, hi)
+    """Fetch OHLCV rows for [lo, hi] from the adaptor and convert to ORM objects."""
+    df = adaptor.fetch_ohlcv(symbol, lo, hi)
     if df.empty:
         return []
-    return [_row_to_orm(market, ticker, ts, row) for ts, row in df.iterrows()]
+    return [_row_to_orm(instrument_id, ts, row) for ts, row in df.iterrows()]
 
 
 def _prompt_retry(label: str) -> bool:
-    """Ask the user whether to retry a failed fetch. Auto-skip in non-interactive sessions."""
+    """Prompt the user to retry after a fetch error. Returns True if they want to retry, False to abort."""
     if not sys.stdin.isatty():
         print(
             f"[data] {label}: non-interactive session, skipping retry",
@@ -233,22 +375,21 @@ def _prompt_retry(label: str) -> bool:
 
 
 def _fetch_with_retry(
-    market: str,
     adaptor: DataSourceAdaptor,
-    ticker: str,
+    instrument_id: int,
+    symbol: str,
     lo: date,
     hi: date,
     label: str,
 ) -> list[OHLCV] | None:
-    """Fetch [lo, hi] with interactive retry on adaptor error. Returns None if aborted."""
+    """Fetch with retry loop: on error, prompt the user to retry or abort. Returns None if aborted."""
     while True:
         print(f"[data] {label}: fetching {lo} → {hi} via {adaptor.name}")
         try:
-            return fetch_range(market, adaptor, ticker, lo, hi)
+            return fetch_range(adaptor, instrument_id, symbol, lo, hi)
         except Exception as e:
             print(
-                f"[data] ERROR: {label}: fetch failed "
-                f"({type(e).__name__}: {e})",
+                f"[data] ERROR: {label}: fetch failed " f"({type(e).__name__}: {e})",
                 file=sys.stderr,
             )
             if not _prompt_retry(label):
@@ -257,16 +398,17 @@ def _fetch_with_retry(
 
 def fetch_and_store(
     engine,
-    universe: MarketUniverse,
+    universe: InstrumentUniverse,
     start: date,
     end: date,
 ) -> None:
-    """Fill missing-day gaps in [start, end] for every ticker in the universe."""
-    session = sessionmaker(bind=engine, future=True)
-    with session() as session:
-        for ticker in universe.tickers:
-            label = f"{universe.market}:{ticker}"
-            gaps = find_missing_ranges(session, universe.market, ticker, start, end)
+    """Fetch missing OHLCV rows for all tickers in this universe and upsert them into the DB."""
+    session_factory = sessionmaker(bind=engine, future=True)
+    with session_factory() as session:
+        for symbol in universe.tickers:
+            label = f"{universe.market}:{symbol}"
+            instrument_id = ensure_instrument(session, universe, symbol)
+            gaps = find_missing_ranges(session, instrument_id, start, end)
             if not gaps:
                 print(f"[data] {label}: cache up to date")
                 continue
@@ -275,7 +417,7 @@ def fetch_and_store(
             aborted = False
             for lo, hi in gaps:
                 rows = _fetch_with_retry(
-                    universe.market, universe.adaptor, ticker, lo, hi, label
+                    universe.adaptor, instrument_id, symbol, lo, hi, label
                 )
                 if rows is None:
                     aborted = True
@@ -304,23 +446,33 @@ def fetch_and_store(
 
 def load_snapshot(
     engine,
-    universes: list[MarketUniverse],
+    universes: list[InstrumentUniverse],
     start: date,
     end: date,
 ) -> dict[str, pd.DataFrame]:
-    """Read cached OHLCV rows in [start, end] into a {"market:ticker": DataFrame} mapping."""
-    session = sessionmaker(bind=engine, future=True)
+    """Load OHLCV rows for all tickers in the universes and return a snapshot dict."""
+    session_factory = sessionmaker(bind=engine, future=True)
     snapshot: dict[str, pd.DataFrame] = {}
-    with session() as session:
+    with session_factory() as session:
         for universe in universes:
-            for ticker in universe.tickers:
+            for symbol in universe.tickers:
+                inst = session.execute(
+                    select(Instrument).where(
+                        and_(
+                            Instrument.asset_class == universe.asset_class,
+                            Instrument.market == universe.market,
+                            Instrument.symbol == symbol,
+                        )
+                    )
+                ).scalar_one_or_none()
+                if inst is None:
+                    continue
                 rows = (
                     session.execute(
                         select(OHLCV)
                         .where(
                             and_(
-                                OHLCV.market == universe.market,
-                                OHLCV.ticker == ticker,
+                                OHLCV.instrument_id == inst.instrument_id,
                                 OHLCV.ts >= start,
                                 OHLCV.ts <= end,
                             )
@@ -332,7 +484,7 @@ def load_snapshot(
                 )
                 if not rows:
                     continue
-                snapshot[f"{universe.market}:{ticker}"] = pd.DataFrame(
+                snapshot[f"{universe.market}:{symbol}"] = pd.DataFrame(
                     [
                         {
                             "ts": r.ts,
@@ -358,7 +510,7 @@ def make_publisher() -> tuple[zmq.Context, zmq.Socket]:
 
 
 def main() -> None:
-    """Main entry point: ensure DB is up to date, load snapshot, and publish on a PUB socket."""
+    """Main entry point: fetch missing data, load snapshot, and publish it in a loop."""
     signal.signal(signal.SIGTERM, signal.default_int_handler)
 
     # Get the range of past 12 months
@@ -368,16 +520,16 @@ def main() -> None:
     # Connect to database
     engine = setup_database()
 
-    # Fill missing days for every market universe
-    for universe in MARKET_UNIVERSES:
+    # Fill missing days for every instrument universe
+    for universe in INSTRUMENT_UNIVERSES:
         print(
-            f"[data] universe {universe.market}: "
+            f"[data] universe {universe.asset_class}/{universe.market}: "
             f"{len(universe.tickers)} ticker(s) via {universe.adaptor.name}"
         )
         fetch_and_store(engine, universe, start, end)
 
     snapshot: dict[str, pd.DataFrame] = load_snapshot(
-        engine, MARKET_UNIVERSES, start, end
+        engine, INSTRUMENT_UNIVERSES, start, end
     )
     if not snapshot:
         print("[data] snapshot is empty; nothing to publish")
