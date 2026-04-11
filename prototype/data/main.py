@@ -108,9 +108,8 @@ UK_EQUITIES = ["HSBA.L"]
 FX_PAIRS = [
     "EURUSD=X",
     "GBPUSD=X",
-    "USDJPY=X",
     "AUDUSD=X",
-    "USDCAD=X",
+    "JPYUSD=X",
 ]
 
 INSTRUMENT_UNIVERSES: list[InstrumentUniverse] = [
@@ -489,7 +488,25 @@ def load_snapshot(
                 )
                 if not rows:
                     continue
-                snapshot[f"{universe.market}:{symbol}"] = pd.DataFrame(
+                label = f"{universe.market}:{symbol}"
+                if len(rows) < 2:
+                    print(
+                        f"[data] WARNING: {label}: only {len(rows)} bar(s) "
+                        f"in [{start}, {end}] — need ≥2 to form a return, "
+                        f"excluding from snapshot",
+                        file=sys.stderr,
+                    )
+                    continue
+                closes = [r.adj_close for r in rows]
+                if min(closes) == max(closes):
+                    print(
+                        f"[data] WARNING: {label}: constant close price across "
+                        f"{len(rows)} bar(s) — would make covariance singular, "
+                        f"excluding from snapshot",
+                        file=sys.stderr,
+                    )
+                    continue
+                snapshot[label] = pd.DataFrame(
                     [
                         {
                             "ts": r.ts,
