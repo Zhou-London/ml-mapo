@@ -4,11 +4,17 @@ from __future__ import annotations
 
 import pickle
 import signal
+import sys
 from abc import ABC, abstractmethod
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import numpy as np
 import pandas as pd
 import zmq
+
+from _logging import get_logger, run_module
 
 """--- Import end ---"""
 
@@ -18,6 +24,8 @@ PUB_ADDR = "tcp://*:5556"
 TOPIC_OHLCV = b"OHLCV"
 TOPIC_COV = b"COV"
 """--- Config end ---"""
+
+log = get_logger("risk")
 
 
 def adj_close_panel(ohlcv: dict[str, pd.DataFrame]) -> pd.DataFrame:
@@ -69,39 +77,54 @@ def main() -> None:
     """Run the risk loop: receive a snapshot, compute covariance, publish."""
     signal.signal(signal.SIGTERM, signal.default_int_handler)
 
-    ctx, sub, pub = make_sockets()
-    print(f"[risk] subscribed to {DATA_ADDR}; publishing on {PUB_ADDR}")
+    with log.pipeline("socket.bind", sub=DATA_ADDR, pub=PUB_ADDR):
+        ctx, sub, pub = make_sockets()
 
     factor: RiskFactor = NaiveRiskFactor()
+    log.info("factor configured", factor=factor.name)
 
+    seq = 0
     try:
         while True:
             _, payload = sub.recv_multipart()
-            data = pickle.loads(payload)
-            cov = factor.covariance(data["ohlcv"])
-            print(
-                f"[risk] {factor.name}: computed {cov.shape[0]}x{cov.shape[1]} covariance"
-            )
-            pub.send_multipart(
-                [
-                    TOPIC_COV,
-                    pickle.dumps(
-                        {
-                            "factor": factor.name,
-                            "tickers": list(cov.index),
-                            "covariance": cov,
-                        }
-                    ),
-                ]
-            )
+            seq += 1
+            with log.pipeline("cov.compute", seq=seq, factor=factor.name):
+                try:
+                    data = pickle.loads(payload)
+                    cov = factor.covariance(data["ohlcv"])
+                except Exception as e:
+                    log.exception(
+                        "cov computation failed",
+                        error_type=type(e).__name__,
+                        seq=seq,
+                    )
+                    continue
+                log.info(
+                    "cov ready",
+                    shape=f"{cov.shape[0]}x{cov.shape[1]}",
+                    tickers=len(cov.index),
+                )
+                pub.send_multipart(
+                    [
+                        TOPIC_COV,
+                        pickle.dumps(
+                            {
+                                "factor": factor.name,
+                                "tickers": list(cov.index),
+                                "covariance": cov,
+                            }
+                        ),
+                    ]
+                )
+                log.info("published", topic=TOPIC_COV.decode(), seq=seq)
     except KeyboardInterrupt:
         pass
     finally:
-        print("[risk] closing sockets")
+        log.info("closing sockets", processed=seq)
         sub.close(linger=0)
         pub.close(linger=0)
         ctx.term()
 
 
 if __name__ == "__main__":
-    main()
+    run_module("risk", main)
