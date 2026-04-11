@@ -3,6 +3,7 @@
 from __future__ import annotations
 import pickle
 import signal
+import sys
 import time
 from datetime import date, timedelta
 import pandas as pd
@@ -19,6 +20,7 @@ from sqlalchemy import (
     select,
     text,
 )
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
 """--- Import end ---"""
@@ -72,14 +74,23 @@ class OHLCV(Base):
 def setup_database():
     """Connet to TimescaleDB and initialize the `ohlcv` hypertable if it doesn't exist."""
     engine = create_engine(DB_URL, future=True)
-    Base.metadata.create_all(engine)
-    with engine.begin() as conn:
-        conn.execute(
-            text(
-                "SELECT create_hypertable('ohlcv', 'ts', "
-                "if_not_exists => TRUE, migrate_data => TRUE);"
+    try:
+        Base.metadata.create_all(engine)
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "SELECT create_hypertable('ohlcv', 'ts', "
+                    "if_not_exists => TRUE, migrate_data => TRUE);"
+                )
             )
+    except OperationalError as e:
+        print(
+            f"[data] ERROR: cannot connect to database at {DB_URL}\n"
+            f"[data]   reason: {e.orig}\n"
+            f"[data]   hint:   is TimescaleDB running and reachable on that host/port?",
+            file=sys.stderr,
         )
+        sys.exit(1)
     return engine
 
 
