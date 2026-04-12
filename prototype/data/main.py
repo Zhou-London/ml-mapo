@@ -20,6 +20,7 @@ from adaptors import DataSourceAdaptor, YfAdaptor
 from sqlalchemy import (
     BigInteger,
     Date,
+    Engine,
     Float,
     ForeignKey,
     Integer,
@@ -33,7 +34,7 @@ from sqlalchemy import (
     text,
 )
 from sqlalchemy.exc import OperationalError
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
+from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
 """--- Import end ---"""
 
@@ -143,7 +144,9 @@ INSTRUMENT_UNIVERSES: list[InstrumentUniverse] = [
 # Scope definitions
 LOOKBACK_DAYS = 365
 INITIAL_SUBSCRIBER_GRACE_S = 2.0
-CYCLE_LOG_EVERY_N = 50  # INFO every N idle cycles; DEBUG otherwise
+
+# Logging
+CYCLE_LOG_EVERY_N = 50
 """--- Config end ---"""
 
 log = get_logger("data")
@@ -215,7 +218,7 @@ class OHLCV(Base):
 
 
 def _schema_matches(engine) -> bool:
-    """Check whether the existing DB schema matches the ORM models (all tables exist with expected columns)."""
+    """Check whether the existing DB schema matches the ORM models."""
     inspector = inspect(engine)
     existing = set(inspector.get_table_names())
     for table in Base.metadata.sorted_tables:
@@ -232,12 +235,16 @@ def setup_database():
     """Create tables if they don't exist or if the schema doesn't match, and return an engine connected to the DB."""
     with log.pipeline("db.setup", url=DB_URL):
         engine = create_engine(DB_URL, future=True)
+
         try:
+            # Check table schemas
             if not _schema_matches(engine):
                 log.warn(
                     "schema mismatch; rebuilding",
                     tables=[t.name for t in Base.metadata.sorted_tables],
                 )
+
+                # Drop tables
                 with engine.begin() as conn:
                     for table in reversed(Base.metadata.sorted_tables):
                         conn.execute(
@@ -248,6 +255,8 @@ def setup_database():
                     "schema ok",
                     tables=len(Base.metadata.sorted_tables),
                 )
+
+            # Create tables
             Base.metadata.create_all(engine)
             with engine.begin() as conn:
                 conn.execute(
@@ -256,7 +265,9 @@ def setup_database():
                         "if_not_exists => TRUE, migrate_data => TRUE);"
                     )
                 )
+
             log.info("hypertable ready", table="ohlcv")
+        # Connection Failed
         except OperationalError as e:
             log.error(
                 "cannot connect to database",
@@ -266,6 +277,7 @@ def setup_database():
                 hint="is TimescaleDB running and reachable on that host/port?",
             )
             sys.exit(1)
+
     return engine
 
 
@@ -282,15 +294,19 @@ def _parse_fx_symbol(symbol: str) -> tuple[str, str]:
 
 def _make_detail(universe: InstrumentUniverse, symbol: str):
     """Create an asset-class-specific detail row for this ticker."""
+
     if universe.asset_class == ASSET_CLASS_EQUITY:
         return EquityDetail()
     if universe.asset_class == ASSET_CLASS_FX:
         base, quote = _parse_fx_symbol(symbol)
         return FxDetail(base_currency=base, quote_currency=quote)
+
     raise ValueError(f"unknown asset_class: {universe.asset_class!r}")
 
 
-def ensure_instrument(session, universe: InstrumentUniverse, symbol: str) -> int:
+def ensure_instrument(
+    session: Session, universe: InstrumentUniverse, symbol: str
+) -> int:
     """Ensure an `instruments` row (plus the asset-class detail row) exists for this ticker,
     and return its instrument_id."""
     existing = session.execute(
@@ -310,6 +326,7 @@ def ensure_instrument(session, universe: InstrumentUniverse, symbol: str) -> int
     if universe.asset_class == ASSET_CLASS_FX:
         _, currency = _parse_fx_symbol(symbol)
 
+    # Create the core instrument row
     instrument = Instrument(
         asset_class=universe.asset_class,
         market=universe.market,
@@ -319,6 +336,7 @@ def ensure_instrument(session, universe: InstrumentUniverse, symbol: str) -> int
     session.add(instrument)
     session.flush()
 
+    # Create the detail row
     detail = _make_detail(universe, symbol)
     detail.instrument_id = instrument.instrument_id
     session.add(detail)
@@ -342,7 +360,7 @@ def _row_to_orm(instrument_id: int, ts, row) -> OHLCV:
 
 
 def find_missing_ranges(
-    session, instrument_id: int, start: date, end: date
+    session: Session, instrument_id: int, start: date, end: date
 ) -> list[tuple[date, date]]:
     """Return (lo, hi) date tuples covering missing-day gaps in [start, end] for an instrument."""
     min_ts, max_ts = session.execute(
@@ -367,22 +385,19 @@ def find_missing_ranges(
 
 
 def fetch_and_store(
-    engine,
+    engine: Engine,
     universe: InstrumentUniverse,
     start: date,
     end: date,
 ) -> dict[str, int]:
-    """Batch-fetch every ticker that's missing any bar in [start, end] and upsert.
-
-    Single yfinance call parallelizes over tickers internally; for other
-    adaptors the base class fans out over a thread pool. Returns a stats dict
-    so callers can aggregate across universes into one cycle summary.
-    """
+    """Fetch missing OHLCV data for all tickers in the universe and store it in the DB, returning stats."""
     session_factory = sessionmaker(bind=engine, future=True)
     stats = {"cached": 0, "fetched": 0, "upserted": 0, "warnings": 0, "errors": 0}
+
     with session_factory() as session:
-        # (symbol, instrument_id, label, gaps)
         to_fetch: list[tuple[str, int, str, list[tuple[date, date]]]] = []
+
+        # Check cache before fetching data
         for symbol in universe.tickers:
             label = f"{universe.market}:{symbol}"
             instrument_id = ensure_instrument(session, universe, symbol)
@@ -395,11 +410,10 @@ def fetch_and_store(
         if not to_fetch:
             return stats
 
+        # Prepare metadata
         symbols = [s for s, _, _, _ in to_fetch]
-        # Union of all missing ranges — in steady state this collapses to the
-        # tail day only, so a tight cycle re-downloads just one bar per ticker.
-        batch_lo = min(g[0] for _, _, _, gs in to_fetch for g in gs)
-        batch_hi = max(g[1] for _, _, _, gs in to_fetch for g in gs)
+        batch_lo: date = min(g[0] for _, _, _, gs in to_fetch for g in gs)
+        batch_hi: date = max(g[1] for _, _, _, gs in to_fetch for g in gs)
         log.debug(
             "batch fetch",
             market=universe.market,
@@ -408,8 +422,11 @@ def fetch_and_store(
             end=batch_hi.isoformat(),
             adaptor=universe.adaptor.name,
         )
+
+        # Fetch data
         try:
             result = universe.adaptor.fetch_ohlcv_many(symbols, batch_lo, batch_hi)
+
         except Exception as e:
             log.exception(
                 "batch fetch failed",
@@ -420,6 +437,7 @@ def fetch_and_store(
             stats["errors"] += len(symbols)
             return stats
 
+        # Store data into database
         stats["fetched"] = len(to_fetch)
         for symbol, instrument_id, label, _gaps in to_fetch:
             df = result.get(symbol)
@@ -431,19 +449,21 @@ def fetch_and_store(
                 )
                 stats["warnings"] += 1
                 continue
-            rows = [
-                _row_to_orm(instrument_id, ts, row) for ts, row in df.iterrows()
-            ]
+
+            rows = [_row_to_orm(instrument_id, ts, row) for ts, row in df.iterrows()]
             for row in rows:
                 session.merge(row)
+
             stats["upserted"] += len(rows)
             log.debug("upserted", symbol=label, rows=len(rows))
+
         session.commit()
+
     return stats
 
 
 def load_snapshot(
-    engine,
+    engine: Engine,
     universes: list[InstrumentUniverse],
     start: date,
     end: date,
@@ -528,18 +548,20 @@ def make_publisher() -> tuple[zmq.Context, zmq.Socket]:
 
 
 def _run_cycle(
-    engine,
+    engine: Engine,
     universes: list[InstrumentUniverse],
     start: date,
     end: date,
 ) -> tuple[dict[str, int], dict[str, pd.DataFrame]]:
-    """One pipeline pass: fetch-missing-then-snapshot. Returns (stats, snapshot)."""
+    """Run one fetch+snapshot cycle for the given universes and date window, returning stats and the snapshot."""
     total = {"cached": 0, "fetched": 0, "upserted": 0, "warnings": 0, "errors": 0}
+
     for universe in universes:
         stats = fetch_and_store(engine, universe, start, end)
         for k, v in stats.items():
             total[k] = total.get(k, 0) + v
     snapshot = load_snapshot(engine, universes, start, end)
+
     return total, snapshot
 
 
@@ -577,11 +599,7 @@ def _emit_data_trace(
     end: date,
     snapshot: dict[str, pd.DataFrame],
 ) -> None:
-    """Per-asset raw-data trace: the exact numbers that flow into forecast/risk.
-
-    Researchers use this to answer 'what did the pipeline actually see for
-    AAPL this cycle?' before blaming the downstream math.
-    """
+    """Compose the per-cycle data trace snapshot and emit it."""
     assets: dict[str, dict] = {}
     for label, df in snapshot.items():
         closes = df["adj_close"]
@@ -607,7 +625,8 @@ def _emit_data_trace(
             ),
             "vol_annualized_pct": (
                 round(float(log_rets.std(ddof=0) * math.sqrt(252) * 100), 3)
-                if len(log_rets) else 0.0
+                if len(log_rets)
+                else 0.0
             ),
         }
     log.snapshot(
@@ -635,9 +654,7 @@ def _emit_data_snapshot(
     total_bars = sum(a["bars"] for a in assets)
 
     # Highlight symbols that look unhealthy to the researcher.
-    problems = [
-        a for a in assets if a["nans"] > 0 or a["vol_annualized_pct"] == 0.0
-    ]
+    problems = [a for a in assets if a["nans"] > 0 or a["vol_annualized_pct"] == 0.0]
 
     log.snapshot(
         "data.cycle",
@@ -656,18 +673,14 @@ def _emit_data_snapshot(
 
 
 def main() -> None:
-    """Main entry point: tight fetch→snapshot→publish loop. No sleeps.
-
-    On each iteration we recompute the lookback window, ask the adaptor for
-    any missing bars, reload the snapshot, and publish. Idle cycles (nothing
-    to fetch) still republish so subscribers always have fresh data.
-    """
+    """Main entry point: run one bootstrap cycle, then loop over fetch+snapshot+publish."""
     signal.signal(signal.SIGTERM, signal.default_int_handler)
 
     log.info("lookback configured", days=LOOKBACK_DAYS)
 
     engine = setup_database()
 
+    # Bootstrap with an initial fetch+snapshot to populate the DB
     with log.pipeline("bootstrap", universes=len(INSTRUMENT_UNIVERSES)):
         end = date.today()
         start = end - timedelta(days=LOOKBACK_DAYS)
@@ -676,18 +689,23 @@ def main() -> None:
             start=start.isoformat(),
             end=end.isoformat(),
         )
+
+        # Run a bootstrap cycle
         stats, snapshot = _run_cycle(engine, INSTRUMENT_UNIVERSES, start, end)
         log.info(
             "bootstrap fetch",
             assets=len(snapshot),
             **stats,
         )
+
+        # Observations
         if stats["warnings"] or stats["errors"]:
             log.warn(
                 "bootstrap had problems",
                 warnings=stats["warnings"],
                 errors=stats["errors"],
             )
+
     if not snapshot:
         log.error("bootstrap snapshot empty; aborting")
         sys.exit(1)
@@ -699,16 +717,19 @@ def main() -> None:
     seq = 0
     try:
         while True:
+            # Increment the counter and computes a date window
             seq += 1
             t0 = time.monotonic()
             end = date.today()
             start = end - timedelta(days=LOOKBACK_DAYS)
 
+            # Fetch data
             stats, snapshot = _run_cycle(engine, INSTRUMENT_UNIVERSES, start, end)
             if not snapshot:
                 log.warn("cycle snapshot empty", seq=seq)
                 continue
 
+            # Publish via ZeroMQ
             payload = pickle.dumps(
                 {
                     "tickers": list(snapshot.keys()),
@@ -719,12 +740,13 @@ def main() -> None:
             )
             pub.send_multipart([TOPIC_OHLCV, payload])
 
+            # Observations
             dur_ms = (time.monotonic() - t0) * 1000.0
-            _emit_data_snapshot(
-                seq, start, end, stats, snapshot, len(payload), dur_ms
-            )
+            _emit_data_snapshot(seq, start, end, stats, snapshot, len(payload), dur_ms)
             _emit_data_trace(seq, start, end, snapshot)
-            changed = stats["upserted"] > 0 or stats["warnings"] > 0 or stats["errors"] > 0
+            changed = (
+                stats["upserted"] > 0 or stats["warnings"] > 0 or stats["errors"] > 0
+            )
             noteworthy = changed or seq == 1 or (seq % CYCLE_LOG_EVERY_N == 0)
             emit = log.info if noteworthy else log.debug
             emit(
