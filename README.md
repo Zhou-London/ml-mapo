@@ -30,7 +30,32 @@ Install PostgresSQL and TimescaleDB following the tutorial [here](https://github
 $ psql -h localhost -p 6543 -U postgres
 ```
 
-Run the prototype
+(Optional) If use Docker, reconnect to the db.
+
+```zsh
+$ docker ps -a
+$ docker start <your-db-service>
+```
+
+Install the web-ui dependency.
+
+```zsh
+$ cd web-ui/my-app
+$ npm install
+```
+
+Run the web-ui.
+
+```zsh
+$ npm run dev
+```
+
+(Optional) Alternatively, run the prototype in CLI.
 ```zsh
 $ uv run python prototype/main.py
+```
+
+(Debug) Run a dedicated module.
+```zsh
+$ uv run python prototype/data/main.py
 ```
