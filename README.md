@@ -7,6 +7,8 @@ Machine Learning Multi-Asset Portfolio Optimizer (ML-MAPO)
 - Linux
 - TimescaleDB
 - Python (uv)
+- Docker
+- Node
 
 ## Build
 Activate the Python uv environment:
