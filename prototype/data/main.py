@@ -5,7 +5,6 @@ import pickle
 import signal
 import sys
 import time
-from dataclasses import dataclass, field
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -14,7 +13,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import pandas as pd
 import zmq
 from _logging import run_module
-from adaptors import DataSourceAdaptor, YfAdaptor
+from config import (
+    ASSET_CLASS_EQUITY,
+    ASSET_CLASS_FX,
+    CYCLE_LOG_EVERY_N,
+    DB_URL,
+    INITIAL_SUBSCRIBER_GRACE_S,
+    INSTRUMENT_UNIVERSES,
+    LOOKBACK_DAYS,
+    PUB_ADDR,
+    TOPIC_OHLCV,
+    InstrumentUniverse,
+)
 from snapshots import emit_data_snapshot, emit_data_trace, log
 from sqlalchemy import (
     BigInteger,
@@ -36,117 +46,6 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
 """--- Import end ---"""
-
-"""--- Config start ---"""
-# DB Connection
-DB_URL = "postgresql+psycopg2://postgres:password@localhost:6543/postgres"
-PUB_ADDR = "tcp://*:5555"
-TOPIC_OHLCV = b"OHLCV"
-
-# Asset class definitions
-ASSET_CLASS_EQUITY = "EQUITY"
-ASSET_CLASS_FX = "FX"
-
-
-@dataclass(frozen=True)
-class InstrumentUniverse:
-    """Defines a set of tradable instruments by asset class, market, and ticker symbol,
-    along with the adaptor to fetch their OHLCV data from."""
-
-    asset_class: str
-    market: str
-    adaptor: DataSourceAdaptor
-    tickers: list[str] = field(default_factory=list)
-
-
-US_EQUITIES = [
-    "NVDA",
-    "AAPL",
-    "MSFT",
-    "AMZN",
-    "GOOGL",
-    "GOOG",
-    "AVGO",
-    "META",
-    "TSLA",
-    "WMT",
-    "ASML",
-    "MU",
-    "COST",
-    "NFLX",
-    "AMD",
-    "LRCX",
-    "CSCO",
-    "AMAT",
-    "INTC",
-    "PLTR",
-    "LIN",
-    "KLAC",
-    "TMUS",
-    "PEP",
-    "TXN",
-    "AMGN",
-    "GILD",
-    "ADI",
-    "ISRG",
-    "ARM",
-    "HON",
-    "SHOP",
-    "PDD",
-    "BKNG",
-    "QCOM",
-    "APP",
-    "PANW",
-    "WDC",
-    "STX",
-    "MRVL",
-    "VRTX",
-    "SBUX",
-    "CEG",
-    "CMCSA",
-    "INTU",
-    "CRWD",
-    "MAR",
-    "ADBE",
-    "MELI",
-    "REGN",
-]
-UK_EQUITIES = ["HSBA.L"]
-FX_PAIRS = [
-    "EURUSD=X",
-    "GBPUSD=X",
-    "AUDUSD=X",
-    "JPYUSD=X",
-]
-
-INSTRUMENT_UNIVERSES: list[InstrumentUniverse] = [
-    InstrumentUniverse(
-        asset_class=ASSET_CLASS_EQUITY,
-        market="US",
-        adaptor=YfAdaptor(),
-        tickers=US_EQUITIES,
-    ),
-    InstrumentUniverse(
-        asset_class=ASSET_CLASS_EQUITY,
-        market="UK",
-        adaptor=YfAdaptor(),
-        tickers=UK_EQUITIES,
-    ),
-    InstrumentUniverse(
-        asset_class=ASSET_CLASS_FX,
-        market="FX",
-        adaptor=YfAdaptor(),
-        tickers=FX_PAIRS,
-    ),
-]
-
-# Scope definitions
-LOOKBACK_DAYS = 365
-INITIAL_SUBSCRIBER_GRACE_S = 2.0
-
-# Logging
-CYCLE_LOG_EVERY_N = 50
-"""--- Config end ---"""
 
 
 """--- ORM models start ---"""
