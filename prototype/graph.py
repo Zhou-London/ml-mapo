@@ -150,40 +150,27 @@ class Graph:
     specs: dict[str, NodeSpec]
 
 
+class GraphValidationError(ValueError):
+    """Raised when a graph's topology or port wiring is invalid."""
+
+    def __init__(self, errors: list[str]) -> None:
+        self.errors = errors
+        super().__init__("\n".join(errors))
+
+
 class Executor:
     """Runs a ``Graph`` in topological order, tick by tick."""
 
     def __init__(self, graph: Graph) -> None:
         self.graph = graph
         self.ctx: dict[str, Any] = {"seq": 0}
-        self._order = self._topo_sort()
+        self._order = topo_sort(graph)
         self._inputs_for: dict[str, list[Edge]] = defaultdict(list)
         for e in graph.edges:
             self._inputs_for[e.dst_node].append(e)
 
     def _topo_sort(self) -> list[str]:
-        incoming: dict[str, set[str]] = {n: set() for n in self.graph.nodes}
-        outgoing: dict[str, set[str]] = {n: set() for n in self.graph.nodes}
-        for e in self.graph.edges:
-            if e.src_node not in self.graph.nodes or e.dst_node not in self.graph.nodes:
-                raise ValueError(
-                    f"edge references unknown node: {e.src_node} -> {e.dst_node}"
-                )
-            incoming[e.dst_node].add(e.src_node)
-            outgoing[e.src_node].add(e.dst_node)
-        order: list[str] = []
-        ready = sorted(n for n, ins in incoming.items() if not ins)
-        while ready:
-            n = ready.pop(0)
-            order.append(n)
-            for m in sorted(outgoing[n]):
-                incoming[m].discard(n)
-                if not incoming[m]:
-                    ready.append(m)
-        if len(order) != len(self.graph.nodes):
-            missing = set(self.graph.nodes) - set(order)
-            raise ValueError(f"graph has a cycle; could not order: {sorted(missing)}")
-        return order
+        return topo_sort(self.graph)
 
     def setup(self) -> None:
         for nid in self._order:
@@ -227,6 +214,11 @@ def load_graph(path: str | Path) -> Graph:
     of mid-run.
     """
     data = json.loads(Path(path).read_text())
+    return load_graph_data(data)
+
+
+def load_graph_data(data: dict[str, Any]) -> Graph:
+    """Instantiate and validate a graph from a decoded JSON object."""
     specs: dict[str, NodeSpec] = {}
     nodes: dict[str, Node] = {}
     for raw in data["nodes"]:
@@ -237,6 +229,8 @@ def load_graph(path: str | Path) -> Graph:
             pos=list(raw.get("pos") or [0.0, 0.0]),
         )
         cls = get_node_class(spec.type)
+        if spec.id in nodes:
+            raise GraphValidationError([f"duplicate node id: {spec.id}"])
         specs[spec.id] = spec
         nodes[spec.id] = cls(node_id=spec.id, params=spec.params)
     edges = [
@@ -248,7 +242,9 @@ def load_graph(path: str | Path) -> Graph:
         )
         for e in data.get("edges", [])
     ]
-    return Graph(nodes=nodes, edges=edges, specs=specs)
+    graph = Graph(nodes=nodes, edges=edges, specs=specs)
+    validate_graph(graph)
+    return graph
 
 
 def save_graph(graph: Graph, path: str | Path) -> None:
@@ -258,6 +254,84 @@ def save_graph(graph: Graph, path: str | Path) -> None:
         "edges": [asdict(e) for e in graph.edges],
     }
     Path(path).write_text(json.dumps(data, indent=2))
+
+
+def topo_sort(graph: Graph) -> list[str]:
+    incoming: dict[str, set[str]] = {n: set() for n in graph.nodes}
+    outgoing: dict[str, set[str]] = {n: set() for n in graph.nodes}
+    for e in graph.edges:
+        if e.src_node not in graph.nodes or e.dst_node not in graph.nodes:
+            raise ValueError(f"edge references unknown node: {e.src_node} -> {e.dst_node}")
+        incoming[e.dst_node].add(e.src_node)
+        outgoing[e.src_node].add(e.dst_node)
+    order: list[str] = []
+    ready = sorted(n for n, ins in incoming.items() if not ins)
+    while ready:
+        n = ready.pop(0)
+        order.append(n)
+        for m in sorted(outgoing[n]):
+            incoming[m].discard(n)
+            if not incoming[m]:
+                ready.append(m)
+    if len(order) != len(graph.nodes):
+        missing = set(graph.nodes) - set(order)
+        raise ValueError(f"graph has a cycle; could not order: {sorted(missing)}")
+    return order
+
+
+def validate_graph(graph: Graph) -> None:
+    """Reject missing ports, duplicate inputs, type mismatches, and cycles."""
+    errors: list[str] = []
+    incoming: dict[tuple[str, str], list[tuple[str, str]]] = defaultdict(list)
+
+    for edge in graph.edges:
+        src = graph.nodes.get(edge.src_node)
+        dst = graph.nodes.get(edge.dst_node)
+        if src is None or dst is None:
+            errors.append(f"edge references unknown node: {edge.src_node} -> {edge.dst_node}")
+            continue
+
+        src_outputs = type(src).OUTPUTS
+        dst_inputs = type(dst).INPUTS
+
+        if edge.src_port not in src_outputs:
+            errors.append(
+                f"unknown output port: {edge.src_node}.{edge.src_port} on {type(src).TYPE_NAME}"
+            )
+            continue
+        if edge.dst_port not in dst_inputs:
+            errors.append(
+                f"unknown input port: {edge.dst_node}.{edge.dst_port} on {type(dst).TYPE_NAME}"
+            )
+            continue
+
+        src_type = src_outputs[edge.src_port]
+        dst_type = dst_inputs[edge.dst_port]
+        if src_type != dst_type:
+            errors.append(
+                "type mismatch: "
+                f"{edge.src_node}.{edge.src_port} ({src_type}) -> "
+                f"{edge.dst_node}.{edge.dst_port} ({dst_type})"
+            )
+        incoming[(edge.dst_node, edge.dst_port)].append((edge.src_node, edge.src_port))
+
+    for (node_id, port), sources in sorted(incoming.items()):
+        if len(sources) > 1:
+            rendered = ", ".join(f"{src}.{src_port}" for src, src_port in sources)
+            errors.append(f"multiple edges feed {node_id}.{port}: {rendered}")
+
+    for node_id, node in sorted(graph.nodes.items()):
+        for input_name in type(node).INPUTS:
+            if (node_id, input_name) not in incoming:
+                errors.append(f"missing input: {node_id}.{input_name}")
+
+    try:
+        topo_sort(graph)
+    except ValueError as exc:
+        errors.append(str(exc))
+
+    if errors:
+        raise GraphValidationError(errors)
 
 
 def graph_to_dict(graph: Graph) -> dict[str, Any]:

@@ -1,14 +1,7 @@
-"""Data module — graph-driven fetch/store/load/publish pipeline.
-
-The module's internal topology lives in ``data/graph.json``; this file
-defines the node types, the ORM models, and a small ``main()`` that loads
-the graph and runs ``tick()`` in a loop.
-"""
+"""Data node catalog for the unified ML-MAPO graph."""
 
 from __future__ import annotations
 
-import pickle
-import signal
 import sys
 import time
 from datetime import date, timedelta
@@ -17,21 +10,16 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import pandas as pd
-import zmq
-from _logging import run_module
 from config import (
     ASSET_CLASS_EQUITY,
     ASSET_CLASS_FX,
     CYCLE_LOG_EVERY_N,
     DB_URL,
-    INITIAL_SUBSCRIBER_GRACE_S,
     INSTRUMENT_UNIVERSES,
     LOOKBACK_DAYS,
-    PUB_ADDR,
-    TOPIC_OHLCV,
     InstrumentUniverse,
 )
-from graph import Executor, Node, load_graph, register_node
+from graph import Node, register_node
 from snapshots import emit_data_snapshot, emit_data_trace, log
 from sqlalchemy import (
     BigInteger,
@@ -459,48 +447,6 @@ class SnapshotLoadNode(Node):
         return {"snapshot": snapshot}
 
 
-@register_node("data/Publisher")
-class PublisherNode(Node):
-    """Binds a ZMQ PUB and broadcasts each snapshot as a pickled payload."""
-
-    CATEGORY = "data"
-    INPUTS = {"snapshot": "ohlcv_snapshot", "start": "date", "end": "date"}
-    OUTPUTS = {"payload_bytes": "int"}
-    PARAMS = {
-        "addr": ("str", PUB_ADDR),
-        "topic": ("str", TOPIC_OHLCV.decode()),
-        "subscriber_grace_s": ("float", INITIAL_SUBSCRIBER_GRACE_S),
-    }
-
-    def setup(self) -> None:
-        addr = self.params["addr"]
-        with log.pipeline("publish.bind", addr=addr):
-            self._socket = zmq.Context.instance().socket(zmq.PUB)
-            self._socket.bind(addr)
-        time.sleep(float(self.params["subscriber_grace_s"]))
-
-    def process(
-        self, snapshot: dict[str, pd.DataFrame], start: date, end: date
-    ) -> dict:
-        if not snapshot:
-            log.warn("cycle snapshot empty; skipping publish", seq=self.ctx.get("seq"))
-            return {"payload_bytes": 0}
-        payload = pickle.dumps(
-            {
-                "tickers": list(snapshot.keys()),
-                "start": start.isoformat(),
-                "end": end.isoformat(),
-                "ohlcv": snapshot,
-            }
-        )
-        self._socket.send_multipart([self.params["topic"].encode(), payload])
-        return {"payload_bytes": len(payload)}
-
-    def teardown(self) -> None:
-        if getattr(self, "_socket", None) is not None:
-            self._socket.close(linger=0)
-
-
 @register_node("data/Observer")
 class ObserverNode(Node):
     """Folds each tick's stats into structured snapshot/trace events + cycle log."""
@@ -509,7 +455,6 @@ class ObserverNode(Node):
     INPUTS = {
         "stats": "dict",
         "snapshot": "ohlcv_snapshot",
-        "payload_bytes": "int",
         "start": "date",
         "end": "date",
     }
@@ -519,13 +464,13 @@ class ObserverNode(Node):
         self,
         stats: dict,
         snapshot: dict,
-        payload_bytes: int,
         start: date,
         end: date,
     ) -> dict:
         seq = int(self.ctx.get("seq", 0))
         t0 = self.ctx.get("t0", time.monotonic())
         duration_ms = (time.monotonic() - t0) * 1000.0
+        payload_bytes = 0
 
         emit_data_snapshot(seq, start, end, stats, snapshot, payload_bytes, duration_ms)
         emit_data_trace(seq, start, end, snapshot)
@@ -543,32 +488,3 @@ class ObserverNode(Node):
             **stats,
         )
         return {}
-
-
-"""--- Graph nodes end ---"""
-
-
-def main() -> None:
-    """Load ``data/graph.json`` and run its ``tick`` forever."""
-    signal.signal(signal.SIGTERM, signal.default_int_handler)
-    log.info("lookback configured", days=LOOKBACK_DAYS)
-
-    graph_path = Path(__file__).parent / "graph.json"
-    graph = load_graph(graph_path)
-    executor = Executor(graph)
-    log.info("graph loaded", path=str(graph_path), nodes=len(graph.nodes))
-    executor.setup()
-
-    try:
-        while True:
-            executor.ctx["t0"] = time.monotonic()
-            executor.tick()
-    except KeyboardInterrupt:
-        pass
-    finally:
-        log.info("closing", ticks=int(executor.ctx.get("seq", 0)))
-        executor.teardown()
-
-
-if __name__ == "__main__":
-    run_module("data", main)

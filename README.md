@@ -1,155 +1,202 @@
 # ml-mapo
-Machine Learning Multi-Asset Portfolio Optimizer (ML-MAPO)
 
-@Philip Trealeaven, UCL Computer Science
+Machine Learning Multi-Asset Portfolio Optimizer (ML-MAPO)  
+Philip Treleaven, UCL Computer Science
 
 ## Dependencies
+
 - Linux
 - TimescaleDB
-- Python (uv) — ≥ 3.14 per [pyproject.toml](pyproject.toml)
-- Node ≥ 20 (for the browser editor under [web-ui/my-app/](web-ui/my-app/))
+- Python via `uv` (Python >= 3.14 per [pyproject.toml](pyproject.toml))
+- Node >= 20 for the editor under [web-ui/my-app/](web-ui/my-app/)
 - Docker (optional, for the DB)
 
-## Build
-Install the python dependencies using `uv`. This will install packages including pytorch, pandas, etc.
+## Setup
+
+Install Python dependencies:
+
 ```zsh
-$ uv sync
+uv sync
 ```
 
-Activate the Python uv environment:
+Activate the virtual environment if you want plain `python`:
+
 ```zsh
-$ source .venv/bin/activate
+source .venv/bin/activate
 ```
 
-(Optional) Alternatively, use `uv run` instead of `python`:
-```zsh
-$ uv run python --version
-``` 
-
-Install PostgresSQL and TimescaleDB following the tutorial [here](https://github.com/timescale/timescaledb) And connect to the database:
+Or run Python commands through `uv`:
 
 ```zsh
-$ docker run -d --name timescaledb \
-    -p 6543:5432 \
-    -e POSTGRES_PASSWORD=password \
-    timescale/timescaledb-ha:pg18
-
-$ psql -h localhost -p 6543 -U postgres
+uv run python --version
 ```
 
-(Optional) If use Docker, you may need to reconnect to the db.
+Start TimescaleDB, for example with Docker:
 
 ```zsh
-$ docker ps -a
-$ docker start <your-db-service>
+docker run -d --name timescaledb \
+  -p 6543:5432 \
+  -e POSTGRES_PASSWORD=password \
+  timescale/timescaledb-ha:pg18
+
+psql -h localhost -p 6543 -U postgres
 ```
 
-Run the prototype in CLI:
-```zsh
-$ uv run python prototype/main.py
-```
+## Run the Prototype
 
-Start the web ui:
-```zsh
-$ cd web-ui/my-app
-$ npm install
-$ npm run dev
-```
-
-## Graph pipeline
-
-Each of the four prototype modules (`data`, `risk`, `forecast`, `optimization`)
-is now a DAG of `Node` classes defined in its `main.py` and wired together by a
-JSON blueprint beside it (`<module>/graph.json`). At startup the module loads
-the graph, topologically sorts it, calls `setup()` once, and runs `tick()`
-forever. ZMQ PUB/SUB still bridges modules; the graph only describes what
-happens *inside* one module per tick.
-
-- Runtime: [prototype/graph.py](prototype/graph.py)
-- Blueprints: [data/graph.json](prototype/data/graph.json),
-  [risk/graph.json](prototype/risk/graph.json),
-  [forecast/graph.json](prototype/forecast/graph.json),
-  [optimization/graph.json](prototype/optimization/graph.json)
-
-### Run the graph pipeline
-
-Exactly the same as the non-graph run — the supervisor spawns each module,
-which loads its own `graph.json`:
+Run the unified graph forever:
 
 ```zsh
-$ uv run python prototype/main.py
+uv run python prototype/main.py
 ```
 
-You'll see a `graph loaded` line per module on startup, e.g.
-`graph loaded path=…/data/graph.json nodes=6`.
-
-To run a single module standalone (handy for debugging one graph in
-isolation; downstream modules block on `recv` until upstream publishes):
+Run exactly one tick, which is useful for UI-triggered execution and debugging:
 
 ```zsh
-$ uv run python prototype/risk/main.py
+uv run python prototype/main.py --ticks 1
 ```
 
-### Edit graphs in the browser
-
-The editor is a Next.js 16 + React 19 app under [web-ui/my-app/](web-ui/my-app/)
-using [LiteGraph.js](https://github.com/comfyanonymous/litegraph.js) (the
-same canvas library ComfyUI is built on) for the node canvas. API routes
-call [prototype/graph_cli.py](prototype/graph_cli.py) for the node schema
-registry and read/write each module's `graph.json` directly.
+Validate the persisted graph without executing it:
 
 ```zsh
-$ cd web-ui/my-app
-$ npm install                # one-time
-$ npm run dev                # opens http://localhost:3000
-# navigate to http://localhost:3000/graph
+uv run python prototype/graph_cli.py validate prototype/graph.json
 ```
 
-Pick a module from the tabs (`data` / `risk` / `forecast` / `optimization`),
-click a palette entry to add a node, drag node headers and wires with the
-mouse, edit parameters in LiteGraph's per-node widgets, and <kbd>Ctrl+S</kbd>
-(or **Save**) writes `<module>/graph.json`. Restart the pipeline (or the
-single module) for saved changes to take effect.
+## Graph Runtime
+
+The pipeline is now one DAG stored in [prototype/graph.json](prototype/graph.json).  
+There is no ZeroMQ layer and no multi-process supervisor anymore.
+
+- Runtime core: [prototype/graph.py](prototype/graph.py)
+- Unified entry point: [prototype/main.py](prototype/main.py)
+- Node catalog loader: [prototype/node_loader.py](prototype/node_loader.py)
+- Persisted graph: [prototype/graph.json](prototype/graph.json)
+
+Node classes still live in the module folders:
+
+- [prototype/data/main.py](prototype/data/main.py)
+- [prototype/risk/main.py](prototype/risk/main.py)
+- [prototype/forecast/main.py](prototype/forecast/main.py)
+- [prototype/optimization/main.py](prototype/optimization/main.py)
+
+Those files are now node catalogs, not standalone pipeline runners.
+
+### Validation rules
+
+The runtime rejects illegal graphs before execution:
+
+- unknown node types
+- duplicate node ids
+- edges pointing at missing nodes
+- unknown input/output port names
+- type mismatches across edges
+- multiple edges feeding the same input port
+- missing required inputs
+- cycles
+
+Execution order is strict across the whole persisted DAG.  
+`topo_sort()` computes one global order and every tick executes nodes in that order.
+
+## Add a Node Type
+
+1. Subclass `graph.Node` in the appropriate module catalog.
+2. Declare `INPUTS`, `OUTPUTS`, `PARAMS`, and `CATEGORY`.
+3. Implement `process(**inputs) -> dict`.
+4. Decorate it with `@register_node("<module>/YourNode")`.
+5. Add it to [prototype/graph.json](prototype/graph.json) directly or through the editor.
+6. Refresh the schema cache with `GET /api/graph/schemas?refresh=1` if needed.
+
+The on-disk graph format is:
+
+```json
+{
+  "nodes": [{ "id": "node_id", "type": "module/Type", "params": {}, "pos": [0, 0] }],
+  "edges": [{ "src_node": "a", "src_port": "out", "dst_node": "b", "dst_port": "in" }]
+}
+```
+
+Ports are named, so the saved graph is independent of LiteGraph slot order.
+
+## Web UI
+
+The editor lives in [web-ui/my-app/](web-ui/my-app/) and is a Next.js 16 + React 19 app using [@comfyorg/litegraph](https://www.npmjs.com/package/@comfyorg/litegraph).
+
+Start it with:
+
+```zsh
+cd web-ui/my-app
+npm install
+npm run dev
+```
+
+Then open [http://localhost:3000/graph](http://localhost:3000/graph).
+
+### What the UI does
+
+- loads schemas from `prototype/graph_cli.py`
+- reads and writes [prototype/graph.json](prototype/graph.json)
+- validates the graph on save using the Python runtime rules
+- lets the user launch one execution tick directly from the UI
+- shows runtime or validation errors in the status bar and run output panel
+
+Current editor features:
+
+- searchable node palette
+- adjustable sidebar
+- dark/light mode
+- custom canvas background and grid
+- category-colored nodes on the canvas
+- explicitly colored wires plus distinct input-port and output-port colors
+- reduced Mac trackpad pinch sensitivity
+- no LiteGraph canvas border
+
+The canvas is intentionally not monochrome. Node colors are applied by module
+category (`data`, `forecast`, `risk`, `opt`) after the graph loads, and the
+editor also stamps the link color onto the live LiteGraph links so the canvas
+stays readable in both themes.
 
 ![editor screenshot](web-ui/my-app/tests/screenshot.png)
 
-Endpoints (all under the Next.js app):
-- `GET /graph` — the editor SPA.
-- `GET /api/modules` — list modules.
-- `GET /api/graph/schemas[?refresh=1]` — spawns
-  [prototype/graph_cli.py](prototype/graph_cli.py) to collect every
-  `@register_node`-decorated class across modules. Cached in-process; use
-  `?refresh=1` after editing node source.
-- `GET /api/graph/<module>` — read the module's `graph.json`.
-- `PUT /api/graph/<module>` — validate and overwrite the module's
-  `graph.json`. Rejects unknown node types, duplicate ids, and edges that
-  reference nonexistent nodes.
+### API endpoints
 
-The named-port ↔ LiteGraph slot-index translation lives in
-[web-ui/my-app/lib/convert.ts](web-ui/my-app/lib/convert.ts); everything else
-(server, on-disk format, tests) stays in port-name land.
+- `GET /graph` — editor page
+- `GET /api/graph` — read the unified graph
+- `PUT /api/graph` — validate and overwrite the unified graph
+- `POST /api/graph/run` — save-and-run flow target; executes one tick
+- `GET /api/graph/schemas[?refresh=1]` — refreshable node schema catalog
 
-### Add a new node type
+The Next app is still just the editor-side bridge.  
+The Python runtime executes the graph; there is no separate Python web server.
 
-1. Subclass `graph.Node` inside the module's `main.py`, declare
-   `INPUTS` / `OUTPUTS` / `PARAMS` / `CATEGORY`, implement `process(**inputs)`
-   (and optionally `setup` / `teardown`), and decorate with
-   `@register_node("<module>/YourNode")`.
-2. Add an entry to the module's `graph.json` (or drop the node in the editor
-   and hit Save).
-3. In the editor, a page reload picks up the new schema; `GET
-   /api/graph/schemas?refresh=1` forces the server-side cache to drop.
+### LiteGraph note
 
-### Tests
+Named-port to slot-index translation lives in [web-ui/my-app/lib/convert.ts](web-ui/my-app/lib/convert.ts).  
+Only the canvas layer uses slot indices; the runtime and saved graph stay in named-port form.
+
+Coloring is also slightly non-obvious with LiteGraph: canvas-level defaults are
+not enough for the rendered nodes and persisted links in this editor. Theme
+changes explicitly recolor node instances and live links in
+[web-ui/my-app/components/GraphEditor.tsx](web-ui/my-app/components/GraphEditor.tsx).
+
+## Tests
+
+Build the editor:
 
 ```zsh
-$ cd web-ui/my-app
-$ npx playwright install chromium      # one-time, needs browser libs
-$ npm run dev &                        # start the app on :3000
-$ PORT=3000 node tests/smoke.mjs       # headless Chromium E2E
+cd web-ui/my-app
+npm run build
 ```
 
-`tests/smoke.mjs` boots a headless Chromium, drives the editor through
-initial load, tab switch, palette-add, save, and reload, and verifies the
-on-disk `graph.json` round-trips. It restores every `graph.json` at the end
-so the repo is unchanged after a run.
+Run the browser smoke test:
+
+```zsh
+cd web-ui/my-app
+npx playwright install chromium
+PORT=3000 node tests/smoke.mjs
+```
+
+`tests/smoke.mjs` restores [prototype/graph.json](prototype/graph.json) after it runs.
+
+## Historical Architecture Doc
+
+[doc/v0.1_architecture.md](doc/v0.1_architecture.md) describes the older multi-process design and is no longer the source of truth for runtime topology.

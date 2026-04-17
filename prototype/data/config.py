@@ -1,10 +1,4 @@
-"""Configuration for the data module.
-
-Centralizes every tunable the pipeline depends on: DB connection, ZMQ topology,
-asset-class dispatch tags, the instrument universe to fetch, the rolling data
-horizon, and observability cadence. ``main.py`` declares only the pipeline
-topology and imports from here.
-"""
+"""Configuration for the data node catalog."""
 
 from __future__ import annotations
 
@@ -19,8 +13,6 @@ from adaptors import DataSourceAdaptor, YfAdaptor
 
 # DB Connection
 DB_URL = "postgresql+psycopg2://postgres:password@localhost:6543/postgres"
-PUB_ADDR = "tcp://*:5555"
-TOPIC_OHLCV = b"OHLCV"
 
 # Asset class definitions
 ASSET_CLASS_EQUITY = "EQUITY"
@@ -121,7 +113,5 @@ INSTRUMENT_UNIVERSES: list[InstrumentUniverse] = [
 
 # Scope definitions
 LOOKBACK_DAYS = 365
-INITIAL_SUBSCRIBER_GRACE_S = 2.0
-
 # Logging
 CYCLE_LOG_EVERY_N = 50

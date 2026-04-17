@@ -1,9 +1,44 @@
 /* ---------- layout shell ---------- */
 .editor-root {
+  --bg: #1a1d21;
+  --bg-elev: #23272d;
+  --bg-panel: #1f2328;
+  --border: #3a4048;
+  --border-strong: #4a5260;
+  --text: #d8dde4;
+  --text-dim: #8c94a0;
+  --accent: #e08950;
+  --accent-dim: #a86432;
+  --ok: #6fb96e;
+  --warn: #d8a248;
+  --err: #d8605b;
+  --canvas-bg: #10161d;
+  --canvas-backdrop: radial-gradient(circle at top left, rgba(96, 197, 215, 0.12), transparent 28%),
+    radial-gradient(circle at bottom right, rgba(224, 137, 80, 0.1), transparent 22%);
   display: flex;
   flex-direction: column;
   height: 100vh;
   min-height: 0;
+  background: var(--bg);
+  color: var(--text);
+}
+
+.editor-root.theme-light {
+  --bg: #eef3f7;
+  --bg-elev: #f8fbfd;
+  --bg-panel: #fbfdff;
+  --border: #ccd8e4;
+  --border-strong: #aebfd0;
+  --text: #203040;
+  --text-dim: #6b7f91;
+  --accent: #d47231;
+  --accent-dim: #9d5323;
+  --ok: #4b9860;
+  --warn: #ca8b21;
+  --err: #c7544d;
+  --canvas-bg: #f3f6f9;
+  --canvas-backdrop: radial-gradient(circle at top left, rgba(19, 135, 155, 0.11), transparent 28%),
+    radial-gradient(circle at bottom right, rgba(212, 114, 49, 0.09), transparent 22%);
 }
 
 /* ---------- topbar ---------- */
@@ -21,10 +56,13 @@
   display: flex;
   align-items: center;
   gap: 10px;
-  font-weight: 600;
-  letter-spacing: 0.02em;
   white-space: nowrap;
   flex-shrink: 0;
+}
+.editor-brand-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
 }
 .editor-brand .mark {
   width: 10px;
@@ -33,7 +71,15 @@
   background: var(--accent);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
 }
-.editor-brand .name { font-size: 13px; }
+.editor-brand .name {
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+.editor-brand .subhead {
+  font-size: 11px;
+  color: var(--text-dim);
+}
 
 .editor-tabs {
   display: flex;
@@ -95,6 +141,11 @@
 }
 .editor-btn:hover { background: var(--bg-elev); border-color: var(--border-strong); }
 .editor-btn:active { transform: translateY(1px); }
+.editor-btn:disabled {
+  cursor: default;
+  opacity: 0.7;
+  transform: none;
+}
 .editor-btn.primary {
   background: var(--accent);
   border-color: var(--accent);
@@ -161,7 +212,7 @@
 .editor-workspace {
   flex: 1;
   display: grid;
-  grid-template-columns: 240px 1fr;
+  grid-template-columns: var(--sidebar-width, 276px) 10px 1fr;
   min-height: 0;
 }
 
@@ -196,6 +247,29 @@
   border: 1px solid var(--border);
   border-radius: 999px;
 }
+.editor-palette-search {
+  padding: 0 12px 10px;
+}
+.editor-search-input {
+  width: 100%;
+  height: 34px;
+  padding: 0 11px;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  outline: none;
+  font: inherit;
+  transition: border-color 120ms ease, box-shadow 120ms ease, background 120ms ease;
+}
+.editor-search-input::placeholder {
+  color: var(--text-dim);
+}
+.editor-search-input:focus {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent);
+  background: var(--bg-elev);
+}
 .editor-palette-list {
   flex: 1;
   overflow-y: auto;
@@ -221,8 +295,8 @@
   transition: background 100ms ease, border-color 100ms ease;
 }
 .editor-palette-item:hover {
-  background: var(--bg-elev);
-  border-color: var(--border);
+  background: color-mix(in srgb, var(--bg-elev) 92%, var(--accent) 8%);
+  border-color: var(--border-strong);
 }
 .editor-palette-item .swatch {
   width: 8px;
@@ -282,14 +356,43 @@
   color: var(--text);
 }
 
+/* ---------- resizer ---------- */
+.editor-resizer {
+  position: relative;
+  cursor: col-resize;
+  background: color-mix(in srgb, var(--border) 35%, transparent);
+}
+.editor-resizer::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  width: 2px;
+  height: 56px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--text-dim) 70%, transparent);
+  transition: background 120ms ease;
+}
+.editor-resizer:hover::before,
+.editor-resizer:active::before {
+  background: var(--accent);
+}
+
 /* ---------- canvas ---------- */
 .editor-canvas-wrap {
   position: relative;
-  background: #15181c;
+  background:
+    var(--canvas-backdrop),
+    linear-gradient(180deg, color-mix(in srgb, var(--canvas-bg) 96%, #fff 4%), var(--canvas-bg));
   min-height: 0;
   overflow: hidden;
 }
-.editor-canvas { display: block; width: 100%; height: 100%; outline: none; }
+.editor-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  outline: none;
+}
 .editor-canvas-meta {
   position: absolute;
   left: 12px;
@@ -303,4 +406,86 @@
   pointer-events: none;
   font-variant-numeric: tabular-nums;
   letter-spacing: 0.02em;
+}
+.editor-console {
+  position: absolute;
+  right: 14px;
+  bottom: 14px;
+  width: min(480px, calc(100% - 28px));
+  max-height: 42%;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 14px;
+  background: color-mix(in srgb, var(--bg-elev) 92%, transparent);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 16px 36px rgba(0, 0, 0, 0.18);
+  backdrop-filter: blur(8px);
+}
+.editor-console.ok {
+  border-color: color-mix(in srgb, var(--ok) 35%, var(--border));
+}
+.editor-console.err {
+  border-color: color-mix(in srgb, var(--err) 45%, var(--border));
+}
+.editor-console-title {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+.editor-console pre {
+  margin: 0;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--text);
+}
+
+.editor-root.theme-light .editor-status,
+.editor-root.theme-light .editor-btn,
+.editor-root.theme-light .editor-panel-header .count,
+.editor-root.theme-light .editor-canvas-meta,
+.editor-root.theme-light .editor-palette-hint kbd {
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.72);
+}
+
+.editor-root.theme-light .editor-palette {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.95), rgba(247, 250, 253, 0.96));
+}
+
+.editor-root.theme-light .editor-search-input {
+  background: #edf3f8;
+}
+
+.editor-root.theme-light .editor-canvas-meta {
+  background: rgba(255, 255, 255, 0.88);
+}
+
+@media (max-width: 900px) {
+  .editor-topbar {
+    gap: 12px;
+  }
+  .editor-brand .subhead {
+    display: none;
+  }
+  .editor-workspace {
+    grid-template-columns: minmax(220px, 38vw) 10px 1fr;
+  }
+  .editor-actions {
+    gap: 6px;
+  }
+  .editor-status {
+    max-width: 220px;
+  }
+  .editor-console {
+    left: 14px;
+    width: auto;
+  }
 }

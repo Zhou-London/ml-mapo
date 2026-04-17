@@ -1,0 +1,265 @@
+{
+  "nodes": [
+    {
+      "id": "db",
+      "type": "data/Database",
+      "params": {
+        "url": "postgresql+psycopg2://postgres:password@localhost:6543/postgres"
+      },
+      "pos": [
+        40,
+        300
+      ]
+    },
+    {
+      "id": "fetch",
+      "type": "data/FetchStore",
+      "params": {},
+      "pos": [
+        300,
+        160
+      ]
+    },
+    {
+      "id": "load",
+      "type": "data/SnapshotLoad",
+      "params": {},
+      "pos": [
+        300,
+        360
+      ]
+    },
+    {
+      "id": "cov",
+      "type": "risk/Covariance",
+      "params": {
+        "factor": "naive_sample_cov",
+        "lookback": 252,
+        "trading_days": 252
+      },
+      "pos": [
+        560,
+        300
+      ]
+    },
+    {
+      "id": "risk_obs",
+      "type": "risk/Observer",
+      "params": {},
+      "pos": [
+        840,
+        220
+      ]
+    },
+    {
+      "id": "alpha",
+      "type": "forecast/Alpha",
+      "params": {
+        "factors": "momentum_12_1",
+        "information_ratios": ""
+      },
+      "pos": [
+        560,
+        520
+      ]
+    },
+    {
+      "id": "forecast_obs",
+      "type": "forecast/Observer",
+      "params": {},
+      "pos": [
+        840,
+        500
+      ]
+    },
+    {
+      "id": "opt_obs",
+      "type": "opt/Observer",
+      "params": {},
+      "pos": [
+        1360,
+        390
+      ]
+    },
+    {
+      "id": "mvo",
+      "type": "opt/Optimizer",
+      "params": {
+        "risk_aversion": 50,
+        "long_only": true
+      },
+      "pos": [
+        1080,
+        390
+      ]
+    },
+    {
+      "id": "data_obs",
+      "type": "data/Observer",
+      "params": {
+        "log_every_n": 50
+      },
+      "pos": [
+        535,
+        20
+      ]
+    },
+    {
+      "id": "clock",
+      "type": "data/Clock",
+      "params": {
+        "lookback_days": 365
+      },
+      "pos": [
+        40,
+        120
+      ]
+    }
+  ],
+  "edges": [
+    {
+      "src_node": "clock",
+      "src_port": "start",
+      "dst_node": "fetch",
+      "dst_port": "start"
+    },
+    {
+      "src_node": "clock",
+      "src_port": "end",
+      "dst_node": "fetch",
+      "dst_port": "end"
+    },
+    {
+      "src_node": "db",
+      "src_port": "engine",
+      "dst_node": "fetch",
+      "dst_port": "engine"
+    },
+    {
+      "src_node": "clock",
+      "src_port": "start",
+      "dst_node": "load",
+      "dst_port": "start"
+    },
+    {
+      "src_node": "clock",
+      "src_port": "end",
+      "dst_node": "load",
+      "dst_port": "end"
+    },
+    {
+      "src_node": "db",
+      "src_port": "engine",
+      "dst_node": "load",
+      "dst_port": "engine"
+    },
+    {
+      "src_node": "fetch",
+      "src_port": "stats",
+      "dst_node": "data_obs",
+      "dst_port": "stats"
+    },
+    {
+      "src_node": "load",
+      "src_port": "snapshot",
+      "dst_node": "data_obs",
+      "dst_port": "snapshot"
+    },
+    {
+      "src_node": "clock",
+      "src_port": "start",
+      "dst_node": "data_obs",
+      "dst_port": "start"
+    },
+    {
+      "src_node": "clock",
+      "src_port": "end",
+      "dst_node": "data_obs",
+      "dst_port": "end"
+    },
+    {
+      "src_node": "load",
+      "src_port": "snapshot",
+      "dst_node": "cov",
+      "dst_port": "ohlcv"
+    },
+    {
+      "src_node": "cov",
+      "src_port": "cov",
+      "dst_node": "risk_obs",
+      "dst_port": "cov"
+    },
+    {
+      "src_node": "cov",
+      "src_port": "factor_name",
+      "dst_node": "risk_obs",
+      "dst_port": "factor_name"
+    },
+    {
+      "src_node": "load",
+      "src_port": "snapshot",
+      "dst_node": "alpha",
+      "dst_port": "ohlcv"
+    },
+    {
+      "src_node": "alpha",
+      "src_port": "scores",
+      "dst_node": "forecast_obs",
+      "dst_port": "scores"
+    },
+    {
+      "src_node": "alpha",
+      "src_port": "alpha",
+      "dst_node": "forecast_obs",
+      "dst_port": "alpha"
+    },
+    {
+      "src_node": "alpha",
+      "src_port": "information_ratios",
+      "dst_node": "forecast_obs",
+      "dst_port": "information_ratios"
+    },
+    {
+      "src_node": "alpha",
+      "src_port": "combine_trace",
+      "dst_node": "forecast_obs",
+      "dst_port": "combine_trace"
+    },
+    {
+      "src_node": "cov",
+      "src_port": "cov",
+      "dst_node": "mvo",
+      "dst_port": "cov"
+    },
+    {
+      "src_node": "alpha",
+      "src_port": "alpha",
+      "dst_node": "mvo",
+      "dst_port": "alpha"
+    },
+    {
+      "src_node": "mvo",
+      "src_port": "weights",
+      "dst_node": "opt_obs",
+      "dst_port": "weights"
+    },
+    {
+      "src_node": "mvo",
+      "src_port": "diagnostics",
+      "dst_node": "opt_obs",
+      "dst_port": "diagnostics"
+    },
+    {
+      "src_node": "mvo",
+      "src_port": "alpha",
+      "dst_node": "opt_obs",
+      "dst_port": "alpha"
+    },
+    {
+      "src_node": "mvo",
+      "src_port": "cov",
+      "dst_node": "opt_obs",
+      "dst_port": "cov"
+    }
+  ]
+}
