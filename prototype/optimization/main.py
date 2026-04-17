@@ -1,4 +1,9 @@
-"""--- Import start ---"""
+"""Optimization module — graph-driven mean-variance solver.
+
+The module's internal topology lives in ``optimization/graph.json``; this
+file defines the node types and a small ``main()`` that loads the graph and
+runs ``tick()`` in a loop.
+"""
 
 from __future__ import annotations
 
@@ -24,79 +29,67 @@ from config import (
     TOPIC_ALPHA,
     TOPIC_COV,
 )
+from graph import Executor, Node, load_graph, register_node
 from snapshots import emit_opt_snapshot, emit_opt_trace, log, log_weights
 
-"""--- Import end ---"""
+
+"""--- Graph nodes start ---"""
 
 
-"""--- Nodes start ---
-
-Nodes are the stages of the optimization module's transformation pipeline.
-They are declared in the order the main loop calls them:
-
-    SubscriberNode → OptimizerNode → ObservabilityNode
-
-The optimization module is a pure sink — it consumes cov + alpha and
-produces weights + diagnostics for dashboards; there is no downstream PUB.
-"""
-
-
-class SubscriberNode:
-    """Subscribes to the risk and forecast PUBs and hands back the latest (cov, alpha) pair.
+@register_node("opt/Subscriber")
+class SubscriberNode(Node):
+    """Subscribes to risk and forecast PUBs; each tick returns the latest (cov, alpha) pair.
 
     Buffers the most recently received covariance and alpha separately; once
-    both have arrived at least once, ``wait_for_pair`` returns them and resets,
-    matching the original run-when-both-present behavior.
+    both have arrived at least once, ``process`` returns them and resets.
     """
 
-    def __init__(
-        self,
-        risk_addr: str,
-        forecast_addr: str,
-        topic_cov: bytes,
-        topic_alpha: bytes,
-        poll_timeout_ms: int,
-    ) -> None:
-        self.risk_addr = risk_addr
-        self.forecast_addr = forecast_addr
-        self.topic_cov = topic_cov
-        self.topic_alpha = topic_alpha
-        self.poll_timeout_ms = poll_timeout_ms
-        self.sub_cov: zmq.Socket | None = None
-        self.sub_alpha: zmq.Socket | None = None
-        self.poller: zmq.Poller | None = None
+    CATEGORY = "opt"
+    OUTPUTS = {"cov": "covariance", "alpha": "alpha_series"}
+    PARAMS = {
+        "risk_addr": ("str", RISK_ADDR),
+        "forecast_addr": ("str", FORECAST_ADDR),
+        "topic_cov": ("str", TOPIC_COV.decode()),
+        "topic_alpha": ("str", TOPIC_ALPHA.decode()),
+        "poll_timeout_ms": ("int", POLL_TIMEOUT_MS),
+    }
+
+    def setup(self) -> None:
+        ctx = zmq.Context.instance()
+
+        self._sub_cov = ctx.socket(zmq.SUB)
+        self._sub_cov.connect(self.params["risk_addr"])
+        self._sub_cov.setsockopt(
+            zmq.SUBSCRIBE, self.params["topic_cov"].encode()
+        )
+
+        self._sub_alpha = ctx.socket(zmq.SUB)
+        self._sub_alpha.connect(self.params["forecast_addr"])
+        self._sub_alpha.setsockopt(
+            zmq.SUBSCRIBE, self.params["topic_alpha"].encode()
+        )
+
+        self._poller = zmq.Poller()
+        self._poller.register(self._sub_cov, zmq.POLLIN)
+        self._poller.register(self._sub_alpha, zmq.POLLIN)
+
         self._latest_cov: dict | None = None
         self._latest_alpha: dict | None = None
 
-    def connect(self) -> None:
-        ctx = zmq.Context.instance()
-
-        self.sub_cov = ctx.socket(zmq.SUB)
-        self.sub_cov.connect(self.risk_addr)
-        self.sub_cov.setsockopt(zmq.SUBSCRIBE, self.topic_cov)
-
-        self.sub_alpha = ctx.socket(zmq.SUB)
-        self.sub_alpha.connect(self.forecast_addr)
-        self.sub_alpha.setsockopt(zmq.SUBSCRIBE, self.topic_alpha)
-
-        self.poller = zmq.Poller()
-        self.poller.register(self.sub_cov, zmq.POLLIN)
-        self.poller.register(self.sub_alpha, zmq.POLLIN)
-
-    def wait_for_pair(self) -> tuple[dict, dict]:
-        """Block until both a covariance and an alpha have been seen; return them and reset."""
+    def process(self) -> dict:
+        timeout = int(self.params["poll_timeout_ms"])
         while True:
-            events = dict(self.poller.poll(timeout=self.poll_timeout_ms))
-            if self.sub_cov in events:
-                _, payload = self.sub_cov.recv_multipart()
+            events = dict(self._poller.poll(timeout=timeout))
+            if self._sub_cov in events:
+                _, payload = self._sub_cov.recv_multipart()
                 self._latest_cov = pickle.loads(payload)
                 log.info(
                     "received cov",
                     tickers=len(self._latest_cov["tickers"]),
                     factor=self._latest_cov.get("factor"),
                 )
-            if self.sub_alpha in events:
-                _, payload = self.sub_alpha.recv_multipart()
+            if self._sub_alpha in events:
+                _, payload = self._sub_alpha.recv_multipart()
                 self._latest_alpha = pickle.loads(payload)
                 log.info(
                     "received alpha",
@@ -104,33 +97,53 @@ class SubscriberNode:
                     factors=self._latest_alpha.get("factors"),
                 )
             if self._latest_cov is not None and self._latest_alpha is not None:
-                cov, alpha = self._latest_cov, self._latest_alpha
+                cov = self._latest_cov["covariance"]
+                alpha = self._latest_alpha["alpha"]
                 self._latest_cov = None
                 self._latest_alpha = None
-                return cov, alpha
+                return {"cov": cov, "alpha": alpha}
 
-    def close(self) -> None:
-        if self.sub_cov is not None:
-            self.sub_cov.close(linger=0)
-        if self.sub_alpha is not None:
-            self.sub_alpha.close(linger=0)
+    def teardown(self) -> None:
+        for sock_attr in ("_sub_cov", "_sub_alpha"):
+            s = getattr(self, sock_attr, None)
+            if s is not None:
+                s.close(linger=0)
 
 
-class OptimizerNode:
+@register_node("opt/Optimizer")
+class OptimizerNode(Node):
     """Solves a long-only (by default) mean-variance program with SLSQP + analytic gradient."""
 
-    def __init__(self, risk_aversion: float, long_only: bool) -> None:
-        self.risk_aversion = risk_aversion
-        self.long_only = long_only
+    CATEGORY = "opt"
+    INPUTS = {"cov": "covariance", "alpha": "alpha_series"}
+    OUTPUTS = {
+        "weights": "weights",
+        "diagnostics": "dict",
+        "cov": "covariance",
+        "alpha": "alpha_series",
+    }
+    PARAMS = {
+        "risk_aversion": ("float", RISK_AVERSION),
+        "long_only": ("bool", LONG_ONLY),
+    }
 
-    def process(
+    def process(self, cov: pd.DataFrame, alpha: pd.Series) -> dict:
+        seq = int(self.ctx.get("seq", 0))
+        with log.pipeline("mvo.solve", seq=seq):
+            weights, diagnostics = self._solve(alpha, cov)
+        return {
+            "weights": weights,
+            "diagnostics": diagnostics,
+            "cov": cov,
+            "alpha": alpha,
+        }
+
+    def _solve(
         self, alpha: pd.Series, cov: pd.DataFrame
     ) -> tuple[pd.Series, dict]:
-        """Run mean-variance optimization.
+        risk_aversion = float(self.params["risk_aversion"])
+        long_only = bool(self.params["long_only"])
 
-        Returns (weights, diagnostics). Diagnostics exposes scipy's convergence
-        state plus portfolio-level metrics so the dashboard can surface them.
-        """
         tickers = [t for t in alpha.index if t in cov.index]
         if not tickers:
             raise ValueError("no overlap between alpha and covariance tickers")
@@ -138,7 +151,6 @@ class OptimizerNode:
         mu = alpha.loc[tickers].to_numpy(dtype=float)
         sigma = cov.loc[tickers, tickers].to_numpy(dtype=float)
         n = len(tickers)
-        risk_aversion = self.risk_aversion
 
         def neg_utility(w: np.ndarray) -> float:
             return float(-(mu @ w) + 0.5 * risk_aversion * w @ sigma @ w)
@@ -153,7 +165,7 @@ class OptimizerNode:
                 "jac": lambda w: np.ones_like(w),
             }
         ]
-        bounds = [(0.0, 1.0)] * n if self.long_only else [(-1.0, 1.0)] * n
+        bounds = [(0.0, 1.0)] * n if long_only else [(-1.0, 1.0)] * n
         w0 = np.full(n, 1.0 / n)
 
         result = minimize(
@@ -192,75 +204,62 @@ class OptimizerNode:
                 expected_return / portfolio_vol if portfolio_vol > 0 else 0.0
             ),
             "weight_budget": weight_budget,
-            "risk_aversion": float(risk_aversion),
-            "long_only": bool(self.long_only),
+            "risk_aversion": risk_aversion,
+            "long_only": long_only,
             "n_considered": n,
         }
         return pd.Series(w, index=tickers), diagnostics
 
 
-class ObservabilityNode:
-    """Folds each solve's weights and diagnostics into structured snapshot/trace events."""
+@register_node("opt/Observer")
+class ObserverNode(Node):
+    """Folds each solve's weights and diagnostics into structured events."""
 
-    def emit_cycle(
+    CATEGORY = "opt"
+    INPUTS = {
+        "weights": "weights",
+        "alpha": "alpha_series",
+        "cov": "covariance",
+        "diagnostics": "dict",
+    }
+
+    def process(
         self,
-        seq: int,
         weights: pd.Series,
         alpha: pd.Series,
         cov: pd.DataFrame,
         diagnostics: dict,
-    ) -> None:
+    ) -> dict:
+        seq = int(self.ctx.get("seq", 0))
         log_weights(weights)
         emit_opt_snapshot(seq, weights, diagnostics)
         emit_opt_trace(seq, weights, alpha, cov, diagnostics)
+        return {}
 
 
-"""--- Nodes end ---"""
+"""--- Graph nodes end ---"""
 
 
 def main() -> None:
-    """Declare the optimization-module pipeline and run the receive → solve → log loop."""
+    """Load ``optimization/graph.json`` and run its ``tick`` forever."""
     signal.signal(signal.SIGTERM, signal.default_int_handler)
 
-    # Topology: SubscriberNode → OptimizerNode → ObservabilityNode
-    subscriber = SubscriberNode(
-        RISK_ADDR, FORECAST_ADDR, TOPIC_COV, TOPIC_ALPHA, POLL_TIMEOUT_MS
-    )
-    optimizer = OptimizerNode(RISK_AVERSION, LONG_ONLY)
-    observer = ObservabilityNode()
+    graph_path = Path(__file__).parent / "graph.json"
+    graph = load_graph(graph_path)
+    executor = Executor(graph)
+    log.info("graph loaded", path=str(graph_path), nodes=len(graph.nodes))
 
     with log.pipeline("socket.bind", risk=RISK_ADDR, forecast=FORECAST_ADDR):
-        subscriber.connect()
+        executor.setup()
 
-    seq = 0
     try:
         while True:
-            cov_payload, alpha_payload = subscriber.wait_for_pair()
-            seq += 1
-            with log.pipeline("mvo.solve", seq=seq):
-                try:
-                    weights, diagnostics = optimizer.process(
-                        alpha_payload["alpha"], cov_payload["covariance"]
-                    )
-                except Exception as e:
-                    log.exception(
-                        "mvo failed",
-                        error_type=type(e).__name__,
-                        seq=seq,
-                    )
-                    continue
-                observer.emit_cycle(
-                    seq,
-                    weights,
-                    alpha_payload["alpha"],
-                    cov_payload["covariance"],
-                    diagnostics,
-                )
+            executor.tick()
     except KeyboardInterrupt:
         pass
     finally:
-        log.info("closing sockets", solved=seq)
-        subscriber.close()
+        log.info("closing sockets", solved=int(executor.ctx.get("seq", 0)))
+        executor.teardown()
         zmq.Context.instance().term()
 
 

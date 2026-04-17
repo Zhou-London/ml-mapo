@@ -1,0 +1,15 @@
+{
+  "nodes": [
+    {"id": "sub", "type": "opt/Subscriber", "params": {}, "pos": [40, 100]},
+    {"id": "mvo", "type": "opt/Optimizer", "params": {}, "pos": [320, 100]},
+    {"id": "obs", "type": "opt/Observer", "params": {}, "pos": [620, 100]}
+  ],
+  "edges": [
+    {"src_node": "sub", "src_port": "cov", "dst_node": "mvo", "dst_port": "cov"},
+    {"src_node": "sub", "src_port": "alpha", "dst_node": "mvo", "dst_port": "alpha"},
+    {"src_node": "mvo", "src_port": "weights", "dst_node": "obs", "dst_port": "weights"},
+    {"src_node": "mvo", "src_port": "alpha", "dst_node": "obs", "dst_port": "alpha"},
+    {"src_node": "mvo", "src_port": "cov", "dst_node": "obs", "dst_port": "cov"},
+    {"src_node": "mvo", "src_port": "diagnostics", "dst_node": "obs", "dst_port": "diagnostics"}
+  ]
+}
