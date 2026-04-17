@@ -6,11 +6,16 @@ Machine Learning Multi-Asset Portfolio Optimizer (ML-MAPO)
 ## Dependencies
 - Linux
 - TimescaleDB
-- Python (uv)
-- Docker
-- Node
+- Python (uv) — ≥ 3.14 per [pyproject.toml](pyproject.toml)
+- Node ≥ 20 (for the browser editor under [web-ui/my-app/](web-ui/my-app/))
+- Docker (optional, for the DB)
 
 ## Build
+Install the python dependencies using `uv`. This will install packages including pytorch, pandas, etc.
+```zsh
+$ uv sync
+```
+
 Activate the Python uv environment:
 ```zsh
 $ source .venv/bin/activate
@@ -18,48 +23,37 @@ $ source .venv/bin/activate
 
 (Optional) Alternatively, use `uv run` instead of `python`:
 ```zsh
-$ uv run python main.py
+$ uv run python --version
 ``` 
 
-Install the python dependencies using `uv`. This will install packages including pytorch, pandas, etc.
-```zsh
-$ uv sync
-```
-
-Install PostgresSQL and TimescaleDB following the tutorial [here](https://github.com/timescale/timescaledb). Connect to the database:
+Install PostgresSQL and TimescaleDB following the tutorial [here](https://github.com/timescale/timescaledb) And connect to the database:
 
 ```zsh
+$ docker run -d --name timescaledb \
+    -p 6543:5432 \
+    -e POSTGRES_PASSWORD=password \
+    timescale/timescaledb-ha:pg18
+
 $ psql -h localhost -p 6543 -U postgres
 ```
 
-(Optional) If use Docker, reconnect to the db.
+(Optional) If use Docker, you may need to reconnect to the db.
 
 ```zsh
 $ docker ps -a
 $ docker start <your-db-service>
 ```
 
-Install the web-ui dependency.
-
-```zsh
-$ cd web-ui/my-app
-$ npm install
-```
-
-Run the web-ui.
-
-```zsh
-$ npm run dev
-```
-
-(Optional) Alternatively, run the prototype in CLI.
+Run the prototype in CLI:
 ```zsh
 $ uv run python prototype/main.py
 ```
 
-(Debug) Run a dedicated module.
+Start the web ui:
 ```zsh
-$ uv run python prototype/data/main.py
+$ cd web-ui/my-app
+$ npm install
+$ npm run dev
 ```
 
 ## Graph pipeline
@@ -98,25 +92,42 @@ $ uv run python prototype/risk/main.py
 
 ### Edit graphs in the browser
 
-The web UI ships a ComfyUI-style blueprint editor at `/graph`:
+The editor is a Next.js 16 + React 19 app under [web-ui/my-app/](web-ui/my-app/)
+using [LiteGraph.js](https://github.com/comfyanonymous/litegraph.js) (the
+same canvas library ComfyUI is built on) for the node canvas. API routes
+call [prototype/graph_cli.py](prototype/graph_cli.py) for the node schema
+registry and read/write each module's `graph.json` directly.
 
 ```zsh
-$ cd web-ui/my-app && npm run dev
-# then open http://localhost:3000/graph
+$ cd web-ui/my-app
+$ npm install                # one-time
+$ npm run dev                # opens http://localhost:3000
+# navigate to http://localhost:3000/graph
 ```
 
-Pick a module from the tabs (Data / Risk / Forecast / Optimization), drag
-nodes, wire ports, edit parameters in the node widgets, hit **Save**. The
-editor writes the module's `graph.json` back to disk. Restart the pipeline
-(or the single module) for changes to take effect.
+Pick a module from the tabs (`data` / `risk` / `forecast` / `optimization`),
+click a palette entry to add a node, drag node headers and wires with the
+mouse, edit parameters in LiteGraph's per-node widgets, and <kbd>Ctrl+S</kbd>
+(or **Save**) writes `<module>/graph.json`. Restart the pipeline (or the
+single module) for saved changes to take effect.
 
-Under the hood:
-- `GET /api/graph/schemas` — spawns [prototype/graph_cli.py](prototype/graph_cli.py)
-  which imports every module to collect `@register_node`-decorated classes,
-  then returns their input/output/param schemas. Cached in memory; hit
-  `?refresh=1` after changing node source.
-- `GET /api/graph/<module>` / `PUT /api/graph/<module>` — read/write the
-  module's `graph.json`.
+![editor screenshot](web-ui/my-app/tests/screenshot.png)
+
+Endpoints (all under the Next.js app):
+- `GET /graph` — the editor SPA.
+- `GET /api/modules` — list modules.
+- `GET /api/graph/schemas[?refresh=1]` — spawns
+  [prototype/graph_cli.py](prototype/graph_cli.py) to collect every
+  `@register_node`-decorated class across modules. Cached in-process; use
+  `?refresh=1` after editing node source.
+- `GET /api/graph/<module>` — read the module's `graph.json`.
+- `PUT /api/graph/<module>` — validate and overwrite the module's
+  `graph.json`. Rejects unknown node types, duplicate ids, and edges that
+  reference nonexistent nodes.
+
+The named-port ↔ LiteGraph slot-index translation lives in
+[web-ui/my-app/lib/convert.ts](web-ui/my-app/lib/convert.ts); everything else
+(server, on-disk format, tests) stays in port-name land.
 
 ### Add a new node type
 
@@ -126,5 +137,19 @@ Under the hood:
    `@register_node("<module>/YourNode")`.
 2. Add an entry to the module's `graph.json` (or drop the node in the editor
    and hit Save).
-3. If the editor is running, hit `GET /api/graph/schemas?refresh=1` so the
-   palette picks up the new type.
+3. In the editor, a page reload picks up the new schema; `GET
+   /api/graph/schemas?refresh=1` forces the server-side cache to drop.
+
+### Tests
+
+```zsh
+$ cd web-ui/my-app
+$ npx playwright install chromium      # one-time, needs browser libs
+$ npm run dev &                        # start the app on :3000
+$ PORT=3000 node tests/smoke.mjs       # headless Chromium E2E
+```
+
+`tests/smoke.mjs` boots a headless Chromium, drives the editor through
+initial load, tab switch, palette-add, save, and reload, and verifies the
+on-disk `graph.json` round-trips. It restores every `graph.json` at the end
+so the repo is unchanged after a run.
