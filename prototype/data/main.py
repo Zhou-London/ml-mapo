@@ -10,13 +10,12 @@ from datetime import date, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-import math
 
-import numpy as np
 import pandas as pd
 import zmq
-from _logging import get_logger, run_module
+from _logging import run_module
 from adaptors import DataSourceAdaptor, YfAdaptor
+from snapshots import emit_data_snapshot, emit_data_trace, log
 from sqlalchemy import (
     BigInteger,
     Date,
@@ -148,8 +147,6 @@ INITIAL_SUBSCRIBER_GRACE_S = 2.0
 # Logging
 CYCLE_LOG_EVERY_N = 50
 """--- Config end ---"""
-
-log = get_logger("data")
 
 
 class Base(DeclarativeBase):
@@ -292,23 +289,11 @@ def _parse_fx_symbol(symbol: str) -> tuple[str, str]:
     return core[:3], core[3:]
 
 
-def _make_detail(universe: InstrumentUniverse, symbol: str):
-    """Create an asset-class-specific detail row for this ticker."""
-
-    if universe.asset_class == ASSET_CLASS_EQUITY:
-        return EquityDetail()
-    if universe.asset_class == ASSET_CLASS_FX:
-        base, quote = _parse_fx_symbol(symbol)
-        return FxDetail(base_currency=base, quote_currency=quote)
-
-    raise ValueError(f"unknown asset_class: {universe.asset_class!r}")
-
-
 def ensure_instrument(
     session: Session, universe: InstrumentUniverse, symbol: str
 ) -> int:
     """Ensure an `instruments` row (plus the asset-class detail row) exists for this ticker,
-    and return its instrument_id."""
+    and return its instrument_id. The caller is responsible for committing."""
     existing = session.execute(
         select(Instrument).where(
             and_(
@@ -326,7 +311,6 @@ def ensure_instrument(
     if universe.asset_class == ASSET_CLASS_FX:
         _, currency = _parse_fx_symbol(symbol)
 
-    # Create the core instrument row
     instrument = Instrument(
         asset_class=universe.asset_class,
         market=universe.market,
@@ -336,52 +320,19 @@ def ensure_instrument(
     session.add(instrument)
     session.flush()
 
-    # Create the detail row
-    detail = _make_detail(universe, symbol)
-    detail.instrument_id = instrument.instrument_id
-    session.add(detail)
-    session.commit()
-    return instrument.instrument_id
-
-
-def _row_to_orm(instrument_id: int, ts, row) -> OHLCV:
-    """Convert a OHLCV row to an ORM object,
-    filling in the instrument_id and parsing types."""
-    return OHLCV(
-        instrument_id=instrument_id,
-        ts=ts.date() if hasattr(ts, "date") else ts,
-        open=float(row["Open"]),
-        high=float(row["High"]),
-        low=float(row["Low"]),
-        close=float(row["Close"]),
-        adj_close=float(row["Adj Close"]),
-        volume=int(row["Volume"]),
-    )
-
-
-def find_missing_ranges(
-    session: Session, instrument_id: int, start: date, end: date
-) -> list[tuple[date, date]]:
-    """Return (lo, hi) date tuples covering missing-day gaps in [start, end] for an instrument."""
-    min_ts, max_ts = session.execute(
-        select(func.min(OHLCV.ts), func.max(OHLCV.ts)).where(
-            and_(
-                OHLCV.instrument_id == instrument_id,
-                OHLCV.ts >= start,
-                OHLCV.ts <= end,
-            )
+    if universe.asset_class == ASSET_CLASS_EQUITY:
+        detail = EquityDetail(instrument_id=instrument.instrument_id)
+    elif universe.asset_class == ASSET_CLASS_FX:
+        base, quote = _parse_fx_symbol(symbol)
+        detail = FxDetail(
+            instrument_id=instrument.instrument_id,
+            base_currency=base,
+            quote_currency=quote,
         )
-    ).one()
-
-    if min_ts is None:
-        return [(start, end)]
-
-    gaps: list[tuple[date, date]] = []
-    if start < min_ts:
-        gaps.append((start, min_ts - timedelta(days=1)))
-    if max_ts < end:
-        gaps.append((max_ts + timedelta(days=1), end))
-    return gaps
+    else:
+        raise ValueError(f"unknown asset_class: {universe.asset_class!r}")
+    session.add(detail)
+    return instrument.instrument_id
 
 
 def fetch_and_store(
@@ -390,43 +341,61 @@ def fetch_and_store(
     start: date,
     end: date,
 ) -> dict[str, int]:
-    """Fetch missing OHLCV data for all tickers in the universe and store it in the DB, returning stats."""
-    session_factory = sessionmaker(bind=engine, future=True)
+    """Fetch OHLCV bars missing between ``[start, end]`` and upsert them.
+
+    For every symbol we resume from the day after our latest bar in the
+    window (or from ``start`` if we have nothing yet). All symbols that
+    still need data are fetched in one batch covering the earliest required
+    day through ``end``; yfinance is idempotent on overlap and ``merge``
+    swallows same-valued rows.
+    """
     stats = {"cached": 0, "fetched": 0, "upserted": 0, "warnings": 0, "errors": 0}
+    session_factory = sessionmaker(bind=engine, future=True)
 
     with session_factory() as session:
-        to_fetch: list[tuple[str, int, str, list[tuple[date, date]]]] = []
+        ids = {s: ensure_instrument(session, universe, s) for s in universe.tickers}
+        session.commit()
 
-        # Check cache before fetching data
-        for symbol in universe.tickers:
-            label = f"{universe.market}:{symbol}"
-            instrument_id = ensure_instrument(session, universe, symbol)
-            gaps = find_missing_ranges(session, instrument_id, start, end)
-            if not gaps:
+        last_ts = dict(
+            session.execute(
+                select(OHLCV.instrument_id, func.max(OHLCV.ts))
+                .where(
+                    and_(
+                        OHLCV.instrument_id.in_(ids.values()),
+                        OHLCV.ts >= start,
+                        OHLCV.ts <= end,
+                    )
+                )
+                .group_by(OHLCV.instrument_id)
+            ).all()
+        )
+
+        to_fetch: list[tuple[str, int]] = []
+        fetch_windows: list[date] = []
+        for symbol, iid in ids.items():
+            prev = last_ts.get(iid)
+            if prev is not None and prev >= end:
                 stats["cached"] += 1
-            else:
-                to_fetch.append((symbol, instrument_id, label, gaps))
+                continue
+            to_fetch.append((symbol, iid))
+            fetch_windows.append(prev + timedelta(days=1) if prev else start)
 
         if not to_fetch:
             return stats
 
-        # Prepare metadata
-        symbols = [s for s, _, _, _ in to_fetch]
-        batch_lo: date = min(g[0] for _, _, _, gs in to_fetch for g in gs)
-        batch_hi: date = max(g[1] for _, _, _, gs in to_fetch for g in gs)
+        symbols = [s for s, _ in to_fetch]
+        batch_start = min(fetch_windows)
         log.debug(
             "batch fetch",
             market=universe.market,
             symbols=len(symbols),
-            start=batch_lo.isoformat(),
-            end=batch_hi.isoformat(),
+            start=batch_start.isoformat(),
+            end=end.isoformat(),
             adaptor=universe.adaptor.name,
         )
 
-        # Fetch data
         try:
-            result = universe.adaptor.fetch_ohlcv_many(symbols, batch_lo, batch_hi)
-
+            result = universe.adaptor.fetch_ohlcv_many(symbols, batch_start, end)
         except Exception as e:
             log.exception(
                 "batch fetch failed",
@@ -437,10 +406,10 @@ def fetch_and_store(
             stats["errors"] += len(symbols)
             return stats
 
-        # Store data into database
         stats["fetched"] = len(to_fetch)
-        for symbol, instrument_id, label, _gaps in to_fetch:
+        for symbol, iid in to_fetch:
             df = result.get(symbol)
+            label = f"{universe.market}:{symbol}"
             if df is None or df.empty:
                 log.warn(
                     "no rows returned; check ticker/market suffix",
@@ -449,13 +418,21 @@ def fetch_and_store(
                 )
                 stats["warnings"] += 1
                 continue
-
-            rows = [_row_to_orm(instrument_id, ts, row) for ts, row in df.iterrows()]
-            for row in rows:
-                session.merge(row)
-
-            stats["upserted"] += len(rows)
-            log.debug("upserted", symbol=label, rows=len(rows))
+            for ts, row in df.iterrows():
+                session.merge(
+                    OHLCV(
+                        instrument_id=iid,
+                        ts=ts.date() if hasattr(ts, "date") else ts,
+                        open=float(row["Open"]),
+                        high=float(row["High"]),
+                        low=float(row["Low"]),
+                        close=float(row["Close"]),
+                        adj_close=float(row["Adj Close"]),
+                        volume=int(row["Volume"]),
+                    )
+                )
+            stats["upserted"] += len(df)
+            log.debug("upserted", symbol=label, rows=len(df))
 
         session.commit()
 
@@ -565,113 +542,6 @@ def _run_cycle(
     return total, snapshot
 
 
-def _asset_health_row(label: str, df: pd.DataFrame) -> dict:
-    """Compute per-asset health metrics for the overview dashboard."""
-    closes = df["adj_close"]
-    first = float(closes.iloc[0])
-    last = float(closes.iloc[-1])
-    lo = float(closes.min())
-    hi = float(closes.max())
-    period_ret = ((last / first) - 1.0) * 100.0 if first else 0.0
-    log_rets = np.log(closes / closes.shift(1)).dropna()
-    vol_annual = (
-        float(log_rets.std(ddof=0) * math.sqrt(252) * 100.0) if len(log_rets) else 0.0
-    )
-    nans = int(df.isna().sum().sum())
-    return {
-        "symbol": label,
-        "bars": int(len(df)),
-        "first_bar": df.index.min().isoformat(),
-        "last_bar": df.index.max().isoformat(),
-        "first_close": round(first, 4),
-        "last_close": round(last, 4),
-        "lo_close": round(lo, 4),
-        "hi_close": round(hi, 4),
-        "period_return_pct": round(period_ret, 3),
-        "vol_annualized_pct": round(vol_annual, 3),
-        "nans": nans,
-    }
-
-
-def _emit_data_trace(
-    seq: int,
-    start: date,
-    end: date,
-    snapshot: dict[str, pd.DataFrame],
-) -> None:
-    """Compose the per-cycle data trace snapshot and emit it."""
-    assets: dict[str, dict] = {}
-    for label, df in snapshot.items():
-        closes = df["adj_close"]
-        log_rets = np.log(closes / closes.shift(1)).dropna()
-        assets[label] = {
-            "bars": int(len(df)),
-            "first_bar": df.index.min().isoformat(),
-            "last_bar": df.index.max().isoformat(),
-            "first_close": round(float(closes.iloc[0]), 4),
-            "last_close": round(float(closes.iloc[-1]), 4),
-            "n_log_returns": int(len(log_rets)),
-            "log_return_last": (
-                round(float(log_rets.iloc[-1]), 6) if len(log_rets) else 0.0
-            ),
-            "log_return_mean_daily": (
-                round(float(log_rets.mean()), 6) if len(log_rets) else 0.0
-            ),
-            "log_return_std_daily": (
-                round(float(log_rets.std(ddof=0)), 6) if len(log_rets) else 0.0
-            ),
-            "return_annualized_pct": (
-                round(float(log_rets.mean() * 252 * 100), 3) if len(log_rets) else 0.0
-            ),
-            "vol_annualized_pct": (
-                round(float(log_rets.std(ddof=0) * math.sqrt(252) * 100), 3)
-                if len(log_rets)
-                else 0.0
-            ),
-        }
-    log.snapshot(
-        "data.trace",
-        {
-            "seq": seq,
-            "window": {"start": start.isoformat(), "end": end.isoformat()},
-            "assets": assets,
-        },
-    )
-
-
-def _emit_data_snapshot(
-    seq: int,
-    start: date,
-    end: date,
-    stats: dict[str, int],
-    snapshot: dict[str, pd.DataFrame],
-    payload_bytes: int,
-    duration_ms: float,
-) -> None:
-    """Compose the per-cycle data overview snapshot and emit it."""
-    assets = [_asset_health_row(label, df) for label, df in snapshot.items()]
-    assets.sort(key=lambda a: a["symbol"])
-    total_bars = sum(a["bars"] for a in assets)
-
-    # Highlight symbols that look unhealthy to the researcher.
-    problems = [a for a in assets if a["nans"] > 0 or a["vol_annualized_pct"] == 0.0]
-
-    log.snapshot(
-        "data.cycle",
-        {
-            "seq": seq,
-            "window": {"start": start.isoformat(), "end": end.isoformat()},
-            "fetch": stats,
-            "duration_ms": round(duration_ms, 1),
-            "payload_bytes": payload_bytes,
-            "total_assets": len(assets),
-            "total_bars": total_bars,
-            "problem_count": len(problems),
-            "assets": assets,
-        },
-    )
-
-
 def main() -> None:
     """Main entry point: run one bootstrap cycle, then loop over fetch+snapshot+publish."""
     signal.signal(signal.SIGTERM, signal.default_int_handler)
@@ -742,8 +612,8 @@ def main() -> None:
 
             # Observations
             dur_ms = (time.monotonic() - t0) * 1000.0
-            _emit_data_snapshot(seq, start, end, stats, snapshot, len(payload), dur_ms)
-            _emit_data_trace(seq, start, end, snapshot)
+            emit_data_snapshot(seq, start, end, stats, snapshot, len(payload), dur_ms)
+            emit_data_trace(seq, start, end, snapshot)
             changed = (
                 stats["upserted"] > 0 or stats["warnings"] > 0 or stats["errors"] > 0
             )
