@@ -1,0 +1,18 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "web-ui",
+      "cwd": "web-ui/my-app",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev"],
+      "port": 3000
+    },
+    {
+      "name": "prototype-pipeline",
+      "runtimeExecutable": "uv",
+      "runtimeArgs": ["run", "python", "prototype/main.py"],
+      "port": 5555
+    }
+  ]
+}

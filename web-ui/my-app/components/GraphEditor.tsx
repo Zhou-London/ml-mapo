@@ -67,6 +67,25 @@ export default function GraphEditor() {
       canvas.background_image = "";
       canvas.render_shadows = false;
       canvas.allow_searchbox = true;
+      // LiteGraph's own telemetry overlay (T/I/N/V/FPS) collides with the
+      // custom HUD in the corner — suppress it.
+      canvas.show_info = false;
+      // Match LiteGraph's own background to our theme so the canvas area
+      // reads as one continuous panel instead of two shades of grey.
+      canvas.clear_background_color = "#15181c";
+      // LGraphCanvas normally renders into a separate bgcanvas and then
+      // drawImage()s it to the front, scaling by devicePixelRatio in the
+      // process. That scaling only composes ~1/dpr² of the visible area on
+      // retina, producing the "mask rectangle" + trails the user saw.
+      // Pointing bgcanvas at the same element short-circuits that path —
+      // LiteGraph renders directly onto the front context.
+      canvas.bgcanvas = canvas.canvas;
+      canvas.bgctx = canvas.ctx;
+      // Default wheel delta is ~1.1; bump so trackpad pinch/zoom doesn't
+      // feel sluggish.
+      canvas.zoom_speed = 1.15;
+      canvas.ds.min_scale = 0.2;
+      canvas.ds.max_scale = 3;
       graph.onAfterChange = () => setDirty(true);
       lgRef.current = { graph, canvas };
       fetchSchemas();
@@ -110,6 +129,10 @@ export default function GraphEditor() {
       handles.graph.start();
       refreshHud();
       setDirty(false);
+      // Fit the camera after the canvas raster has a real size. A single
+      // RAF is often too early (ResizeObserver hasn't fired yet), so poll
+      // a few frames until we see a non-trivial width.
+      scheduleFit(lgRef);
       setStatus({
         kind: "ok",
         text: `loaded ${m} · ${doc.nodes.length} nodes, ${doc.edges.length} edges`,
@@ -205,24 +228,46 @@ export default function GraphEditor() {
     return () => window.removeEventListener("keydown", onKey);
   }, [save]);
 
-  /* ---------- resize handler (LiteGraph canvas is raster) ---------- */
+  const fitView = useCallback(() => {
+    const handles = lgRef.current;
+    if (!handles) return;
+    fitCanvasToGraph(handles.canvas, handles.graph);
+  }, []);
+
+  /* ---------- resize handler ----------
+   * With bgcanvas aliased to the front canvas, LiteGraph renders once
+   * and applies `setTransform(dpr)` before `ds.toCanvasContext` — so
+   * the raster MUST be DPR-scaled for content to cover the full area.
+   * CSS keeps `width:100% height:100%` so the browser rescales the
+   * DPR-sized raster back to the CSS footprint, giving crisp retina
+   * text without the compositor mask artifact.
+   */
   useEffect(() => {
     const el = canvasElRef.current;
-    const handles = lgRef.current;
     if (!el) return;
     function resize() {
-      if (!el) return;
+      const handles = lgRef.current;
+      if (!el || !handles) return;
+      const parent = el.parentElement;
+      if (!parent) return;
+      const cssW = parent.clientWidth;
+      const cssH = parent.clientHeight;
+      if (cssW < 1 || cssH < 1) return;
       const dpr = window.devicePixelRatio || 1;
-      const { width, height } = el.getBoundingClientRect();
-      el.width = Math.max(1, Math.floor(width * dpr));
-      el.height = Math.max(1, Math.floor(height * dpr));
-      handles?.canvas.resize();
-      handles?.canvas.draw(true, true);
+      handles.canvas.resize(
+        Math.max(1, Math.floor(cssW * dpr)),
+        Math.max(1, Math.floor(cssH * dpr)),
+      );
+      handles.canvas.setDirty(true, true);
     }
     resize();
     const ro = new ResizeObserver(resize);
     ro.observe(el.parentElement as Element);
-    return () => ro.disconnect();
+    window.addEventListener("resize", resize);
+    return () => {
+      ro.disconnect();
+      window.removeEventListener("resize", resize);
+    };
   }, [schemas]);
 
   /* ---------- render ---------- */
@@ -235,9 +280,8 @@ export default function GraphEditor() {
     <div className="editor-root">
       <header className="editor-topbar">
         <div className="editor-brand">
-          <span className="mark">◆</span>
-          <span>ML-MAPO</span>
-          <span className="sub">graph editor</span>
+          <span className="mark" aria-hidden="true" />
+          <span className="name">ML-MAPO</span>
         </div>
         <nav className="editor-tabs" role="tablist" aria-label="Module tabs">
           {MODULES.map((m) => (
@@ -254,67 +298,138 @@ export default function GraphEditor() {
         </nav>
         <div className="editor-spacer" />
         <div className="editor-actions">
-          <button className="editor-btn" onClick={reload} title="Reload graph from disk">
-            ↻ Reload
-          </button>
-          <button
-            className="editor-btn primary"
-            onClick={save}
-            title="Save graph to disk (Ctrl+S)"
-          >
-            Save
-          </button>
           <span
             className={"editor-status" + (status ? " " + status.kind : "")}
             role="status"
             aria-live="polite"
+            data-testid="editor-hud"
           >
-            {status?.text ?? ""}
-            {dirty ? " · unsaved" : ""}
+            <span className="dot" aria-hidden="true" />
+            <span className="text">{status?.text ?? "ready"}</span>
+            {dirty ? <span className="dirty">unsaved</span> : null}
           </span>
+          <button
+            className="editor-btn"
+            onClick={fitView}
+            title="Fit graph to view"
+            aria-label="Fit view"
+          >
+            Fit
+          </button>
+          <button className="editor-btn" onClick={reload} title="Reload graph from disk">
+            Reload
+          </button>
+          <button
+            className="editor-btn primary"
+            onClick={save}
+            title="Save graph to disk (⌘/Ctrl+S)"
+          >
+            Save
+          </button>
         </div>
       </header>
 
       <main className="editor-workspace">
         <aside className="editor-palette" aria-label="Node palette">
           <header className="editor-panel-header">
-            <h3>Palette</h3>
-            <span className="sub">{module}</span>
+            <h3>Nodes</h3>
+            <span className="count">{paletteItems.length}</span>
           </header>
           <div className="editor-palette-list">
-            {paletteItems.map((s) => (
-              <button
-                key={s.type}
-                className="editor-palette-item"
-                data-cat={s.category}
-                data-type={s.type}
-                title={s.doc || s.type}
-                onClick={() => addNode(s.type)}
-              >
-                <span className="type">{s.type.split("/").slice(1).join("/")}</span>
-              </button>
-            ))}
+            {paletteItems.map((s) => {
+              const label = s.type.split("/").slice(1).join("/") || s.type;
+              return (
+                <button
+                  key={s.type}
+                  className="editor-palette-item"
+                  data-cat={s.category}
+                  data-type={s.type}
+                  title={s.doc || s.type}
+                  onClick={() => addNode(s.type)}
+                >
+                  <span className="swatch" aria-hidden="true" />
+                  <span className="type">{label}</span>
+                  <span className="plus" aria-hidden="true">+</span>
+                </button>
+              );
+            })}
             {paletteItems.length === 0 && schemas ? (
-              <p style={{ color: "var(--text-dim)", padding: "10px 14px", fontSize: 12 }}>
+              <p className="editor-palette-empty">
                 No registered node types for this module.
               </p>
             ) : null}
           </div>
-          <p className="editor-palette-hint">
-            Click a node to add. Drag node headers to move, drag from an output
-            port to an input port to wire. Right-click a node (or a wire) for
-            LiteGraph&apos;s contextual menu. <kbd>Ctrl+S</kbd> saves.
-          </p>
+          <footer className="editor-palette-hint">
+            <span>Click to add · drag ports to wire</span>
+            <span>
+              <kbd>⌘S</kbd> save
+            </span>
+          </footer>
         </aside>
 
         <section className="editor-canvas-wrap">
           <canvas ref={canvasElRef} className="editor-canvas" tabIndex={0} />
-          <div className="editor-hud" data-testid="editor-hud">
+          <div className="editor-canvas-meta" aria-hidden="true">
             {module} · {hud.nodes} nodes · {hud.edges} edges
-            {dirty ? " · unsaved" : ""}
           </div>
         </section>
       </main>
     </div>
   );
+}
+
+function scheduleFit(
+  ref: React.MutableRefObject<LGContextHandles | null>,
+  attempt = 0,
+): void {
+  requestAnimationFrame(() => {
+    const handles = ref.current;
+    if (!handles) return;
+    const el = handles.canvas.canvas as HTMLCanvasElement | null;
+    const rect = el?.getBoundingClientRect();
+    const ready = rect && rect.width > 32 && rect.height > 32;
+    if (ready) {
+      fitCanvasToGraph(handles.canvas, handles.graph);
+      return;
+    }
+    if (attempt < 20) scheduleFit(ref, attempt + 1);
+  });
+}
+
+/**
+ * Center and zoom the canvas so the full graph fits. We compute a padded
+ * bounding box of all nodes and defer to LGraphCanvas' own `fitToBounds`
+ * helper, which handles DPR and visible-area math for us.
+ */
+function fitCanvasToGraph(
+  canvas: import("@comfyorg/litegraph").LGraphCanvas,
+  graph: import("@comfyorg/litegraph").LGraph,
+): void {
+  const nodes = graph._nodes ?? [];
+  if (!nodes.length) return;
+
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (const n of nodes) {
+    const [x, y] = (n.pos as [number, number]) ?? [0, 0];
+    const [w, h] = (n.size as [number, number]) ?? [120, 60];
+    if (x < minX) minX = x;
+    if (y < minY) minY = y;
+    if (x + w > maxX) maxX = x + w;
+    if (y + h > maxY) maxY = y + h;
+  }
+  if (!Number.isFinite(minX)) return;
+
+  const pad = 60;
+  const bounds: [number, number, number, number] = [
+    minX - pad,
+    minY - pad,
+    maxX - minX + pad * 2,
+    maxY - minY + pad * 2,
+  ];
+  // zoom=0.9 → leaves ~10% margin vs. a tight fit.
+  canvas.ds.fitToBounds(bounds, { zoom: 0.9 });
+  canvas.setDirty(true, true);
 }
