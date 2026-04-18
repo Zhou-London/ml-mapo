@@ -12,7 +12,6 @@ import numpy as np
 import pandas as pd
 
 from graph import Node, register_node
-from snapshots import emit_risk_snapshot, emit_risk_trace, log
 
 
 class RiskFactor(ABC):
@@ -54,7 +53,7 @@ class CovarianceNode(Node):
 
     CATEGORY = "risk"
     INPUTS = {"ohlcv": "ohlcv_snapshot"}
-    OUTPUTS = {"cov": "covariance", "factor_name": "str"}
+    OUTPUTS = {"cov": "covariance"}
     PARAMS = {
         "factor": ("str", NaiveRiskFactor.name),
         "lookback": ("int", 252),
@@ -67,29 +66,6 @@ class CovarianceNode(Node):
             lookback=int(self.params["lookback"]),
             trading_days=int(self.params["trading_days"]),
         )
-        log.info("factor configured", factor=self._factor.name)
 
     def process(self, ohlcv: dict[str, pd.DataFrame]) -> dict:
-        seq = int(self.ctx.get("seq", 0))
-        with log.pipeline("cov.compute", seq=seq, factor=self._factor.name):
-            cov = self._factor.covariance(ohlcv)
-            log.info(
-                "cov ready",
-                shape=f"{cov.shape[0]}x{cov.shape[1]}",
-                tickers=len(cov.index),
-            )
-        return {"cov": cov, "factor_name": self._factor.name}
-
-
-@register_node("risk/Observer")
-class ObserverNode(Node):
-    """Folds each cycle's covariance into snapshot/trace events."""
-
-    CATEGORY = "risk"
-    INPUTS = {"cov": "covariance", "factor_name": "str"}
-
-    def process(self, cov: pd.DataFrame, factor_name: str) -> dict:
-        seq = int(self.ctx.get("seq", 0))
-        emit_risk_snapshot(seq, factor_name, cov)
-        emit_risk_trace(seq, factor_name, cov)
-        return {}
+        return {"cov": self._factor.covariance(ohlcv)}

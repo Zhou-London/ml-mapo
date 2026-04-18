@@ -16,7 +16,6 @@ Use `uv` for Python work.
 - `uv run python prototype/main.py --ticks 1` — run one tick and exit.
 - `uv run python prototype/graph_cli.py schemas` — dump registered node schemas as JSON.
 - `uv run python prototype/graph_cli.py validate prototype/graph.json` — validate the persisted graph.
-- `PYTHONUNBUFFERED=1 uv run python -u prototype/main.py 2>&1 | tee run.log` — capture logs.
 - `cd web-ui/my-app && npm install && npm run dev` — start the editor on `http://localhost:3000/graph`.
 - `cd web-ui/my-app && npm run build` — production build and TypeScript check.
 - `cd web-ui/my-app && PORT=3000 node tests/smoke.mjs` — browser smoke test.
@@ -81,29 +80,13 @@ Default factor implementations:
 - [prototype/forecast/main.py](prototype/forecast/main.py) — `forecast/Alpha` defaults to `NaiveMomentumAlpha`
 - [prototype/optimization/main.py](prototype/optimization/main.py) — `opt/Optimizer` uses SLSQP with analytic gradient
 
-## Logging
-
-Shared logging lives in [prototype/_logging.py](prototype/_logging.py).
-
-- `get_logger(module)` — module logger
-- `run_module(module, main_fn)` — wraps the top-level runner
-- `log.pipeline("stage", **fields)` — timed structured stage logging
-- `log.snapshot(name, data)` — structured samples
-- `log.table(msg, rows, headers=...)` — aligned log blocks
-
-Environment flags:
-
-- `MAPO_LOG_LEVEL=DEBUG`
-- `MAPO_LOG_FORMAT=json`
-- `NO_COLOR=1`
-
 ## Web UI
 
 The editor is a Next.js 16 app-router project under [web-ui/my-app/](web-ui/my-app/).
 
 - `GET /api/graph` reads [prototype/graph.json](prototype/graph.json)
 - `PUT /api/graph` validates and writes it
-- `POST /api/graph/run` executes one tick and returns logs/errors
+- `POST /api/graph/run` executes one tick and returns stdout/stderr
 - `GET /api/graph/schemas` returns the node catalog
 
 Important files:

@@ -26,7 +26,7 @@ def load_all_node_modules() -> None:
     sys.path.insert(0, str(HERE))
     try:
         for pkg_name, pkg_dir in MODULE_DIRS:
-            for conflict in ("config", "snapshots", "main"):
+            for conflict in ("config", "main"):
                 sys.modules.pop(conflict, None)
             sys.path.insert(0, str(pkg_dir))
             try:

@@ -113,5 +113,3 @@ INSTRUMENT_UNIVERSES: list[InstrumentUniverse] = [
 
 # Scope definitions
 LOOKBACK_DAYS = 365
-# Logging
-CYCLE_LOG_EVERY_N = 50

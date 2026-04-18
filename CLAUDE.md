@@ -14,16 +14,10 @@ Python toolchain is `uv` (requires Python ≥3.14 per [pyproject.toml](pyproject
 - `uv sync` — install/update Python deps.
 - `uv run python prototype/main.py` — run the unified graph forever (Ctrl+C to stop). `--ticks N` runs N ticks then exits; `--graph PATH` points at a different graph file.
 - `uv run python prototype/graph_cli.py schemas` — dump every `@register_node`-decorated class as JSON (palette catalog / debugging).
-- `PYTHONUNBUFFERED=1 uv run python -u prototype/main.py 2>&1 | tee run.log` — capture logs when stdout is piped (child output is otherwise block-buffered).
 - `cd web-ui/my-app && npm install && npm run dev` — Next.js editor (http://localhost:3000/graph).
 - `cd web-ui/my-app && npm run build` — production build (also runs `tsc`).
 - `cd web-ui/my-app && npm run lint` — ESLint via `next lint`.
 - `cd web-ui/my-app && PORT=3100 node tests/smoke.mjs` — headless-Chromium end-to-end test against an already-running dev server on that port (requires `npx playwright install chromium` once). No Python test suite is wired up yet.
-
-### Logging env vars ([prototype/_logging.py](prototype/_logging.py))
-- `MAPO_LOG_LEVEL=DEBUG` — raise verbosity (default INFO).
-- `MAPO_LOG_FORMAT=json` — newline-delimited JSON instead of the human-readable text format.
-- `NO_COLOR=1` — disable ANSI colors.
 
 ### Database
 TimescaleDB at `postgresql+psycopg2://postgres:password@localhost:6543/postgres` (default baked into the `data/Database` node in [prototype/graph.json](prototype/graph.json); override via the node's `url` param). The `ohlcv` table is promoted to a hypertable on `ts`.
@@ -47,16 +41,6 @@ See [doc/v0.1_architecture.md](doc/v0.1_architecture.md) for the v0.1 spec — n
   - `RiskFactor` in [prototype/risk/main.py](prototype/risk/main.py) — default `naive_sample_cov` (annualized sample covariance of daily log returns on `adj_close`, lookback 252). Select via the `factor` param on `risk/Covariance`.
   - `AlphaFactor` in [prototype/forecast/main.py](prototype/forecast/main.py) — default `momentum_12_1`. The `factors` / `information_ratios` params on `forecast/Alpha` accept CSVs; multiple factors combine via IR-weighted z-score rescaling.
   - Optimization: `opt/Optimizer` runs `scipy.optimize.minimize(SLSQP)` with an analytic gradient; defaults `risk_aversion=50`, `long_only=true`.
-
-## Logging
-
-Every module goes through [prototype/_logging.py](prototype/_logging.py):
-
-- `get_logger(module)` and `run_module(module, main_fn)` — the latter wraps `__main__` and handles crash/interrupt reporting.
-- `log.pipeline("stage", **fields)` context manager — stacks stage names, emits start/done/failed with duration.
-- `log.snapshot(name, data)` — structured state sample (dashboard panel in JSON mode; compact summary in text mode).
-- `log.table(msg, rows, headers=...)` — indented aligned block.
-- Each module publishes its snapshot schemas in `<module>/snapshots.py`.
 
 ## Web UI (Next.js 16 + LiteGraph)
 

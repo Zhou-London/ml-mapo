@@ -27,9 +27,6 @@ export interface ThemePalette {
   nodeSurfaceLight: string;
   nodeOutline: string;
   widgetBg: string;
-  observerHeader: string;
-  observerBody: string;
-  observerPlaceholder: string;
   nodeCategory: Record<NodeCategory, CategoryColors>;
 }
 
@@ -88,9 +85,6 @@ export const THEMES: Record<ThemeMode, ThemePalette> = {
     nodeSurfaceLight: "#313d49",
     nodeOutline: "#5b6a7a",
     widgetBg: "#161d24",
-    observerHeader: "rgba(255, 255, 255, 0.92)",
-    observerBody: "rgba(228, 234, 244, 0.85)",
-    observerPlaceholder: "rgba(180, 192, 210, 0.65)",
     nodeCategory: {
       data: { color: "#314b6a", bgcolor: "#3e618b", boxcolor: "#75a8e4" },
       forecast: { color: "#35563a", bgcolor: "#45724d", boxcolor: "#88d497" },
@@ -120,9 +114,6 @@ export const THEMES: Record<ThemeMode, ThemePalette> = {
     nodeSurfaceLight: "#dde6ef",
     nodeOutline: "#7d92ab",
     widgetBg: "#ffffff",
-    observerHeader: "rgba(20, 32, 48, 0.92)",
-    observerBody: "rgba(40, 56, 76, 0.86)",
-    observerPlaceholder: "rgba(70, 88, 110, 0.7)",
     nodeCategory: {
       data: { color: "#1f4f8a", bgcolor: "#5d92d3", boxcolor: "#1f4f8a" },
       forecast: { color: "#2b6b3a", bgcolor: "#65b06f", boxcolor: "#2b6b3a" },

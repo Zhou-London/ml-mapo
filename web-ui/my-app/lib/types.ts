@@ -37,20 +37,9 @@ export interface GraphDoc {
   edges: GraphEdge[];
 }
 
-export interface ObserverSnapshot {
-  name: string;
-  data: Record<string, unknown>;
-}
-
-export interface RunReport {
-  ticks: number;
-  observers: Record<string, ObserverSnapshot[]>;
-}
-
 export interface RunResult {
   ok: boolean;
   code: number;
   stdout: string;
   stderr: string;
-  report?: RunReport;
 }

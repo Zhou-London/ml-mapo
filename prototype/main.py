@@ -6,13 +6,10 @@ import argparse
 import time
 from pathlib import Path
 
-from _logging import get_logger, run_module
 from graph import Executor, load_graph
 from node_loader import load_all_node_modules
 
 DEFAULT_GRAPH_PATH = Path(__file__).resolve().parent / "graph.json"
-
-log = get_logger("runner")
 
 
 def parse_args() -> argparse.Namespace:
@@ -36,12 +33,6 @@ def run_graph(graph_path: Path, ticks: int) -> None:
 
     graph = load_graph(graph_path)
     executor = Executor(graph)
-    log.info(
-        "graph loaded",
-        path=str(graph_path),
-        nodes=len(graph.nodes),
-        edges=len(graph.edges),
-    )
     executor.setup()
 
     try:
@@ -56,7 +47,6 @@ def run_graph(graph_path: Path, ticks: int) -> None:
     except KeyboardInterrupt:
         pass
     finally:
-        log.info("closing", ticks=int(executor.ctx.get("seq", 0)))
         executor.teardown()
 
 
@@ -66,4 +56,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    run_module("runner", main)
+    main()

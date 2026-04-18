@@ -43,15 +43,6 @@
       ]
     },
     {
-      "id": "risk_obs",
-      "type": "risk/Observer",
-      "params": {},
-      "pos": [
-        840,
-        220
-      ]
-    },
-    {
       "id": "alpha",
       "type": "forecast/Alpha",
       "params": {
@@ -64,24 +55,6 @@
       ]
     },
     {
-      "id": "forecast_obs",
-      "type": "forecast/Observer",
-      "params": {},
-      "pos": [
-        840,
-        500
-      ]
-    },
-    {
-      "id": "opt_obs",
-      "type": "opt/Observer",
-      "params": {},
-      "pos": [
-        1360,
-        390
-      ]
-    },
-    {
       "id": "mvo",
       "type": "opt/Optimizer",
       "params": {
@@ -91,17 +64,6 @@
       "pos": [
         1080,
         390
-      ]
-    },
-    {
-      "id": "data_obs",
-      "type": "data/Observer",
-      "params": {
-        "log_every_n": 50
-      },
-      "pos": [
-        535,
-        20
       ]
     },
     {
@@ -154,46 +116,10 @@
       "dst_port": "engine"
     },
     {
-      "src_node": "fetch",
-      "src_port": "stats",
-      "dst_node": "data_obs",
-      "dst_port": "stats"
-    },
-    {
-      "src_node": "load",
-      "src_port": "snapshot",
-      "dst_node": "data_obs",
-      "dst_port": "snapshot"
-    },
-    {
-      "src_node": "clock",
-      "src_port": "start",
-      "dst_node": "data_obs",
-      "dst_port": "start"
-    },
-    {
-      "src_node": "clock",
-      "src_port": "end",
-      "dst_node": "data_obs",
-      "dst_port": "end"
-    },
-    {
       "src_node": "load",
       "src_port": "snapshot",
       "dst_node": "cov",
       "dst_port": "ohlcv"
-    },
-    {
-      "src_node": "cov",
-      "src_port": "cov",
-      "dst_node": "risk_obs",
-      "dst_port": "cov"
-    },
-    {
-      "src_node": "cov",
-      "src_port": "factor_name",
-      "dst_node": "risk_obs",
-      "dst_port": "factor_name"
     },
     {
       "src_node": "load",
@@ -202,30 +128,6 @@
       "dst_port": "ohlcv"
     },
     {
-      "src_node": "alpha",
-      "src_port": "scores",
-      "dst_node": "forecast_obs",
-      "dst_port": "scores"
-    },
-    {
-      "src_node": "alpha",
-      "src_port": "alpha",
-      "dst_node": "forecast_obs",
-      "dst_port": "alpha"
-    },
-    {
-      "src_node": "alpha",
-      "src_port": "information_ratios",
-      "dst_node": "forecast_obs",
-      "dst_port": "information_ratios"
-    },
-    {
-      "src_node": "alpha",
-      "src_port": "combine_trace",
-      "dst_node": "forecast_obs",
-      "dst_port": "combine_trace"
-    },
-    {
       "src_node": "cov",
       "src_port": "cov",
       "dst_node": "mvo",
@@ -236,30 +138,6 @@
       "src_port": "alpha",
       "dst_node": "mvo",
       "dst_port": "alpha"
-    },
-    {
-      "src_node": "mvo",
-      "src_port": "weights",
-      "dst_node": "opt_obs",
-      "dst_port": "weights"
-    },
-    {
-      "src_node": "mvo",
-      "src_port": "diagnostics",
-      "dst_node": "opt_obs",
-      "dst_port": "diagnostics"
-    },
-    {
-      "src_node": "mvo",
-      "src_port": "alpha",
-      "dst_node": "opt_obs",
-      "dst_port": "alpha"
-    },
-    {
-      "src_node": "mvo",
-      "src_port": "cov",
-      "dst_node": "opt_obs",
-      "dst_port": "cov"
     }
   ]
 }

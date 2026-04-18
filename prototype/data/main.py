@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import sys
-import time
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -13,14 +12,12 @@ import pandas as pd
 from config import (
     ASSET_CLASS_EQUITY,
     ASSET_CLASS_FX,
-    CYCLE_LOG_EVERY_N,
     DB_URL,
     INSTRUMENT_UNIVERSES,
     LOOKBACK_DAYS,
     InstrumentUniverse,
 )
 from graph import Node, register_node
-from snapshots import emit_data_snapshot, emit_data_trace, log
 from sqlalchemy import (
     BigInteger,
     Date,
@@ -37,7 +34,6 @@ from sqlalchemy import (
     select,
     text,
 )
-from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
 
@@ -140,41 +136,22 @@ class DatabaseNode(Node):
         return {"engine": self._engine}
 
     def _build_engine(self) -> Engine:
-        url = self.params["url"]
-        with log.pipeline("db.setup", url=url):
-            engine = create_engine(url, future=True)
-            try:
-                if not self._schema_matches(engine):
-                    log.warn(
-                        "schema mismatch; rebuilding",
-                        tables=[t.name for t in Base.metadata.sorted_tables],
-                    )
-                    with engine.begin() as conn:
-                        for table in reversed(Base.metadata.sorted_tables):
-                            conn.execute(
-                                text(f"DROP TABLE IF EXISTS {table.name} CASCADE;")
-                            )
-                else:
-                    log.info("schema ok", tables=len(Base.metadata.sorted_tables))
-
-                Base.metadata.create_all(engine)
-                with engine.begin() as conn:
+        engine = create_engine(self.params["url"], future=True)
+        if not self._schema_matches(engine):
+            with engine.begin() as conn:
+                for table in reversed(Base.metadata.sorted_tables):
                     conn.execute(
-                        text(
-                            "SELECT create_hypertable('ohlcv', 'ts', "
-                            "if_not_exists => TRUE, migrate_data => TRUE);"
-                        )
+                        text(f"DROP TABLE IF EXISTS {table.name} CASCADE;")
                     )
-                log.info("hypertable ready", table="ohlcv")
-            except OperationalError as e:
-                log.error(
-                    "cannot connect to database",
-                    url=url,
-                    error_type=type(e.orig).__name__,
-                    error=str(e.orig).splitlines()[0] if str(e.orig) else "",
-                    hint="is TimescaleDB running and reachable on that host/port?",
+
+        Base.metadata.create_all(engine)
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "SELECT create_hypertable('ohlcv', 'ts', "
+                    "if_not_exists => TRUE, migrate_data => TRUE);"
                 )
-                sys.exit(1)
+            )
         return engine
 
     @staticmethod
@@ -255,37 +232,17 @@ class FetchStoreNode(Node):
 
             symbols = [s for s, _ in to_fetch]
             batch_start = min(fetch_windows)
-            log.debug(
-                "batch fetch",
-                market=universe.market,
-                symbols=len(symbols),
-                start=batch_start.isoformat(),
-                end=end.isoformat(),
-                adaptor=universe.adaptor.name,
-            )
 
             try:
                 result = universe.adaptor.fetch_ohlcv_many(symbols, batch_start, end)
-            except Exception as e:
-                log.exception(
-                    "batch fetch failed",
-                    market=universe.market,
-                    symbols=len(symbols),
-                    error_type=type(e).__name__,
-                )
+            except Exception:
                 stats["errors"] += len(symbols)
                 return stats
 
             stats["fetched"] = len(to_fetch)
             for symbol, iid in to_fetch:
                 df = result.get(symbol)
-                label = f"{universe.market}:{symbol}"
                 if df is None or df.empty:
-                    log.warn(
-                        "no rows returned; check ticker/market suffix",
-                        symbol=label,
-                        adaptor=universe.adaptor.name,
-                    )
                     stats["warnings"] += 1
                     continue
                 for ts, row in df.iterrows():
@@ -302,7 +259,6 @@ class FetchStoreNode(Node):
                         )
                     )
                 stats["upserted"] += len(df)
-                log.debug("upserted", symbol=label, rows=len(df))
 
             session.commit()
 
@@ -408,28 +364,12 @@ class SnapshotLoadNode(Node):
                         .scalars()
                         .all()
                     )
-                    if not rows:
-                        continue
-                    label = f"{universe.market}:{symbol}"
                     if len(rows) < 2:
-                        log.warn(
-                            "too few bars; excluding from snapshot",
-                            symbol=label,
-                            bars=len(rows),
-                            window_start=start.isoformat(),
-                            window_end=end.isoformat(),
-                            reason="need >=2 to form a return",
-                        )
                         continue
                     closes = [r.adj_close for r in rows]
                     if min(closes) == max(closes):
-                        log.warn(
-                            "constant close; excluding from snapshot",
-                            symbol=label,
-                            bars=len(rows),
-                            reason="would make covariance singular",
-                        )
                         continue
+                    label = f"{universe.market}:{symbol}"
                     snapshot[label] = pd.DataFrame(
                         [
                             {
@@ -445,46 +385,3 @@ class SnapshotLoadNode(Node):
                         ]
                     ).set_index("ts")
         return {"snapshot": snapshot}
-
-
-@register_node("data/Observer")
-class ObserverNode(Node):
-    """Folds each tick's stats into structured snapshot/trace events + cycle log."""
-
-    CATEGORY = "data"
-    INPUTS = {
-        "stats": "dict",
-        "snapshot": "ohlcv_snapshot",
-        "start": "date",
-        "end": "date",
-    }
-    PARAMS = {"log_every_n": ("int", CYCLE_LOG_EVERY_N)}
-
-    def process(
-        self,
-        stats: dict,
-        snapshot: dict,
-        start: date,
-        end: date,
-    ) -> dict:
-        seq = int(self.ctx.get("seq", 0))
-        t0 = self.ctx.get("t0", time.monotonic())
-        duration_ms = (time.monotonic() - t0) * 1000.0
-        payload_bytes = 0
-
-        emit_data_snapshot(seq, start, end, stats, snapshot, payload_bytes, duration_ms)
-        emit_data_trace(seq, start, end, snapshot)
-
-        changed = stats["upserted"] > 0 or stats["warnings"] > 0 or stats["errors"] > 0
-        every_n = int(self.params["log_every_n"]) or 1
-        noteworthy = changed or seq == 1 or (seq % every_n == 0)
-        emit = log.info if noteworthy else log.debug
-        emit(
-            "cycle",
-            seq=seq,
-            duration_ms=f"{duration_ms:.1f}",
-            assets=len(snapshot),
-            bytes=payload_bytes,
-            **stats,
-        )
-        return {}
