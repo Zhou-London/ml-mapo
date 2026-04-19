@@ -1,73 +1,39 @@
-"""--- Import start ---"""
+"""Forecast node catalog for the unified ML-MAPO graph."""
 
 from __future__ import annotations
 
-import pickle
-import signal
 import sys
 from abc import ABC, abstractmethod
-from collections.abc import Iterable
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import numpy as np
 import pandas as pd
-import zmq
 
-from _logging import get_logger, run_module
-
-"""--- Import end ---"""
-
-"""--- Config start ---"""
-
-DATA_ADDR = "tcp://localhost:5555"
-PUB_ADDR = "tcp://*:5557"
-TOPIC_OHLCV = b"OHLCV"
-TOPIC_ALPHA = b"ALPHA"
-
-"""--- Config end ---"""
-
-log = get_logger("forecast")
-
-
-def adj_close_panel(ohlcv: dict[str, pd.DataFrame]) -> pd.DataFrame:
-    """Given a dict of per-ticker OHLCV DataFrames, return a single DataFrame
-    of adj_close prices indexed by date and ticker."""
-    return (
-        pd.concat({t: df["adj_close"] for t, df in ohlcv.items()}, axis=1)
-        .sort_index()
-        .dropna(how="all")
-    )
+from graph import Node, register_node
 
 
 class AlphaFactor(ABC):
-    """Alpha Factor Interface"""
-
     name: str = "alpha_factor"
 
     @abstractmethod
-    def score(self, ohlcv: dict[str, pd.DataFrame]) -> pd.Series:
-        """Given a dict of per-ticker OHLCV DataFrames, return a
-        Series of alpha scores indexed by ticker."""
+    def score(self, frame: pd.DataFrame) -> pd.Series: ...
 
 
 class NaiveMomentumAlpha(AlphaFactor):
-    """Example momentum factor"""
+    """12-month minus 1-month mean-return momentum on ``adj_close``."""
 
     name = "momentum_12_1"
 
-    def __init__(
-        self, lookback: int = 252, skip: int = 21, trading_days: int = 252
-    ) -> None:
+    def __init__(self, lookback: int = 252, skip: int = 21, trading_days: int = 252) -> None:
         self.lookback = lookback
         self.skip = skip
         self.trading_days = trading_days
 
-    def score(self, ohlcv: dict[str, pd.DataFrame]) -> pd.Series:
-        """12-1 momentum, https://www.gurufocus.com/term/pchange-12-1m"""
-        closes = adj_close_panel(ohlcv)
-        returns = np.log(closes / closes.shift(1)).dropna()
+    def score(self, frame: pd.DataFrame) -> pd.Series:
+        prices = frame.sort_index().dropna(axis=1, how="all")
+        returns = np.log(prices / prices.shift(1)).dropna(how="all")
         if self.skip > 0:
             window = returns.iloc[-self.lookback : -self.skip]
         else:
@@ -75,241 +41,60 @@ class NaiveMomentumAlpha(AlphaFactor):
         return window.mean() * self.trading_days
 
 
-def ir_weighted_combine(
-    scores: dict[str, pd.Series], information_ratios: dict[str, float]
-) -> tuple[pd.Series, dict]:
-    """Combine z-scored factors by IR weights, rescaled to a return magnitude.
+_ALPHA_FACTORS: dict[str, type[AlphaFactor]] = {
+    NaiveMomentumAlpha.name: NaiveMomentumAlpha,
+}
 
-    Returns ``(combined_alpha, trace)`` where ``trace`` captures every
-    intermediate quantity needed to reconstruct the math for any single
-    asset (cross-section means/stds, per-factor z-scores and contributions).
-    """
-    if not scores:
-        raise ValueError("no factor scores to combine")
 
-    tickers: pd.Index | None = None
-    for s in scores.values():
-        tickers = s.index if tickers is None else tickers.union(s.index)
-    assert tickers is not None
+@register_node("forecast/Alpha")
+class AlphaNode(Node):
+    """Scores each configured AlphaFactor, then IR-weighted combines their z-scores."""
 
-    weight_norm = sum(abs(v) for v in information_ratios.values()) or 1.0
-    factor_mean = {name: float(s.mean()) for name, s in scores.items()}
-    factor_std = {
-        name: float(s.std(ddof=0)) if float(s.std(ddof=0)) > 0 else 1.0
-        for name, s in scores.items()
+    CATEGORY = "forecast"
+    INPUTS = {"frame": "frame"}
+    OUTPUTS = {"alpha": "alpha_series"}
+    PARAMS = {
+        "factors": ("str", NaiveMomentumAlpha.name),
+        "information_ratios": ("str", ""),
     }
 
-    combined = pd.Series(0.0, index=tickers)
-    for name, s in scores.items():
-        z = (s - factor_mean[name]) / factor_std[name]
-        combined = combined.add(
-            z * (information_ratios.get(name, 1.0) / weight_norm), fill_value=0.0
-        )
+    def setup(self) -> None:
+        names = [s.strip() for s in str(self.params["factors"]).split(",") if s.strip()]
+        self._factors: list[AlphaFactor] = [_ALPHA_FACTORS[n]() for n in names]
 
-    avg_magnitude = float(np.mean([s.abs().mean() for s in scores.values()]))
-    trace = {
-        "weight_norm": float(weight_norm),
-        "avg_magnitude": avg_magnitude,
-        "factor_mean": factor_mean,
-        "factor_std": factor_std,
-        "ir_weights": {
-            name: information_ratios.get(name, 1.0) / weight_norm for name in scores
-        },
-    }
-    return combined * avg_magnitude, trace
-
-
-def make_sockets() -> tuple[zmq.Context, zmq.Socket, zmq.Socket]:
-    """Build the SUB socket for OHLCV input and the PUB socket for alpha output."""
-    ctx = zmq.Context.instance()
-    sub = ctx.socket(zmq.SUB)
-    sub.connect(DATA_ADDR)
-    sub.setsockopt(zmq.SUBSCRIBE, TOPIC_OHLCV)
-    pub = ctx.socket(zmq.PUB)
-    pub.bind(PUB_ADDR)
-    return ctx, sub, pub
-
-
-def _series_stats(s: pd.Series, k: int = 5) -> dict:
-    """Distributional summary of an alpha/factor series for the dashboard."""
-    s_clean = s.dropna()
-    if len(s_clean) == 0:
-        return {
-            "mean": 0.0, "std": 0.0, "min": 0.0, "max": 0.0,
-            "n": 0, "n_nan": int(len(s) - len(s_clean)),
-            "top": [], "bottom": [],
-        }
-    sorted_s = s_clean.sort_values(ascending=False)
-    return {
-        "mean": round(float(s_clean.mean()), 6),
-        "std": round(float(s_clean.std(ddof=0)), 6),
-        "min": round(float(s_clean.min()), 6),
-        "max": round(float(s_clean.max()), 6),
-        "n": int(len(s_clean)),
-        "n_nan": int(len(s) - len(s_clean)),
-        "top": [
-            {"ticker": str(t), "score": round(float(v), 6)}
-            for t, v in sorted_s.head(k).items()
-        ],
-        "bottom": [
-            {"ticker": str(t), "score": round(float(v), 6)}
-            for t, v in sorted_s.tail(k).items()
-        ],
-    }
-
-
-def _emit_forecast_trace(
-    seq: int,
-    scores: dict[str, pd.Series],
-    combined: pd.Series,
-    combine_trace: dict,
-) -> None:
-    """Per-asset pipeline trace through the forecast math.
-
-    For each symbol we expose: the raw factor score, the cross-section
-    mean/std that normalized it, its z-score, the IR-weighted contribution,
-    and the final combined alpha. This is the full audit trail from raw
-    score to alpha for a single name.
-    """
-    ir_weights = combine_trace["ir_weights"]
-    factor_mean = combine_trace["factor_mean"]
-    factor_std = combine_trace["factor_std"]
-    avg_magnitude = combine_trace["avg_magnitude"]
-
-    assets: dict[str, dict] = {}
-    for symbol in combined.index:
-        factor_rows = []
-        combined_z = 0.0
-        for name, s in scores.items():
-            if symbol not in s.index:
-                continue
-            raw = float(s.loc[symbol])
-            mean = factor_mean[name]
-            std = factor_std[name]
-            z = (raw - mean) / std if std > 0 else 0.0
-            w = ir_weights[name]
-            contrib = z * w
-            combined_z += contrib
-            factor_rows.append(
-                {
-                    "name": name,
-                    "raw_score": round(raw, 6),
-                    "factor_mean": round(mean, 6),
-                    "factor_std": round(std, 6),
-                    "z_score": round(z, 6),
-                    "ir_weight": round(w, 4),
-                    "contribution": round(contrib, 6),
-                }
-            )
-        assets[str(symbol)] = {
-            "factors": factor_rows,
-            "combined_z": round(combined_z, 6),
-            "avg_magnitude": round(avg_magnitude, 6),
-            "alpha": round(float(combined.loc[symbol]), 6),
-        }
-
-    log.snapshot(
-        "forecast.trace",
-        {
-            "seq": seq,
-            "weight_norm": combine_trace["weight_norm"],
-            "avg_magnitude": avg_magnitude,
-            "assets": assets,
-        },
-    )
-
-
-def _emit_forecast_snapshot(
-    seq: int,
-    scores: dict[str, pd.Series],
-    combined: pd.Series,
-    information_ratios: dict[str, float],
-) -> None:
-    factors = [
-        {
-            "name": name,
-            "information_ratio": float(information_ratios.get(name, 1.0)),
-            **_series_stats(s),
-        }
-        for name, s in scores.items()
-    ]
-    log.snapshot(
-        "forecast.alpha",
-        {
-            "seq": seq,
-            "n_factors": len(factors),
-            "factors": factors,
-            "combined": _series_stats(combined, k=10),
-        },
-    )
-
-
-def main() -> None:
-    """Main loop: receive OHLCV data, compute alpha, publish results."""
-    signal.signal(signal.SIGTERM, signal.default_int_handler)
-
-    with log.pipeline("socket.bind", sub=DATA_ADDR, pub=PUB_ADDR):
-        ctx, sub, pub = make_sockets()
-
-    factors: Iterable[AlphaFactor] = [NaiveMomentumAlpha()]
-    information_ratios = {
-        f.name: 1.0 for f in factors
-    }  # ! IRs come from a backtest; for the demo all factors are equal.
-    log.info(
-        "factors configured",
-        factors=[f.name for f in factors],
-        information_ratios=information_ratios,
-    )
-
-    seq = 0
-    try:
-        while True:
-            _, payload = sub.recv_multipart()
-            seq += 1
-            with log.pipeline("alpha.compute", seq=seq):
-                try:
-                    data = pickle.loads(payload)
-                    scores = {f.name: f.score(data["ohlcv"]) for f in factors}
-                    alpha, combine_trace = ir_weighted_combine(
-                        scores, information_ratios
-                    )
-                except Exception as e:
-                    log.exception(
-                        "alpha computation failed",
-                        error_type=type(e).__name__,
-                        seq=seq,
-                    )
-                    continue
-                log.info(
-                    "alpha ready",
-                    tickers=len(alpha),
-                    factors=list(scores.keys()),
-                    mean=float(alpha.mean()),
-                    std=float(alpha.std(ddof=0)),
+        ir_raw = str(self.params["information_ratios"]).strip()
+        if ir_raw:
+            values = [float(x) for x in ir_raw.split(",")]
+            if len(values) != len(names):
+                raise ValueError(
+                    f"information_ratios has {len(values)} values; expected {len(names)}"
                 )
-                _emit_forecast_snapshot(seq, scores, alpha, information_ratios)
-                _emit_forecast_trace(seq, scores, alpha, combine_trace)
-                pub.send_multipart(
-                    [
-                        TOPIC_ALPHA,
-                        pickle.dumps(
-                            {
-                                "factors": list(scores.keys()),
-                                "tickers": list(alpha.index),
-                                "alpha": alpha,
-                            }
-                        ),
-                    ]
-                )
-                log.info("published", topic=TOPIC_ALPHA.decode(), seq=seq)
-    except KeyboardInterrupt:
-        pass
-    finally:
-        log.info("closing sockets", processed=seq)
-        sub.close(linger=0)
-        pub.close(linger=0)
-        ctx.term()
+            self._information_ratios = dict(zip(names, values))
+        else:
+            self._information_ratios = {n: 1.0 for n in names}
 
+    def process(self, frame: pd.DataFrame) -> dict:
+        scores = {f.name: f.score(frame) for f in self._factors}
+        return {"alpha": self._ir_weighted_combine(scores)}
 
-if __name__ == "__main__":
-    run_module("forecast", main)
+    def _ir_weighted_combine(self, scores: dict[str, pd.Series]) -> pd.Series:
+        if not scores:
+            raise ValueError("no factor scores to combine")
+
+        tickers: pd.Index | None = None
+        for score in scores.values():
+            tickers = score.index if tickers is None else tickers.union(score.index)
+        assert tickers is not None
+
+        irs = self._information_ratios
+        weight_norm = sum(abs(v) for v in irs.values()) or 1.0
+
+        combined = pd.Series(0.0, index=tickers)
+        for name, score in scores.items():
+            mean = float(score.mean())
+            std = float(score.std(ddof=0)) or 1.0
+            z = (score - mean) / std
+            combined = combined.add(z * (irs.get(name, 1.0) / weight_norm), fill_value=0.0)
+
+        avg_magnitude = float(np.mean([score.abs().mean() for score in scores.values()]))
+        return combined * avg_magnitude

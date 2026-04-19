@@ -1,0 +1,58 @@
+- generic [active] [ref=e1]:
+  - generic [ref=e4]:
+    - banner [ref=e5]:
+      - generic [ref=e8]:
+        - generic [ref=e9]: ML-MAPO
+        - generic [ref=e10]: Unified Graph Editor
+      - generic [ref=e11]:
+        - status [ref=e12]:
+          - generic [ref=e14]: loaded graph · 9 nodes, 13 edges
+        - button "Fit" [ref=e15] [cursor=pointer]
+        - button "Reload" [ref=e16] [cursor=pointer]
+        - button "Light Mode" [ref=e17] [cursor=pointer]
+        - button "Run" [ref=e18] [cursor=pointer]
+        - button "Save" [ref=e19] [cursor=pointer]
+    - main [ref=e20]:
+      - complementary "Node palette" [ref=e21]:
+        - generic [ref=e22]:
+          - heading "Nodes" [level=3] [ref=e23]
+          - generic [ref=e24]: "10"
+        - searchbox "Filter node types" [ref=e26]
+        - generic [ref=e27]:
+          - button "Aggregate" [ref=e28] [cursor=pointer]:
+            - generic [ref=e30]: Aggregate
+            - generic [ref=e31]: +
+          - button "Database" [ref=e32] [cursor=pointer]:
+            - generic [ref=e34]: Database
+            - generic [ref=e35]: +
+          - button "DateRange" [ref=e36] [cursor=pointer]:
+            - generic [ref=e38]: DateRange
+            - generic [ref=e39]: +
+          - button "FX" [ref=e40] [cursor=pointer]:
+            - generic [ref=e42]: FX
+            - generic [ref=e43]: +
+          - button "UKEquity" [ref=e44] [cursor=pointer]:
+            - generic [ref=e46]: UKEquity
+            - generic [ref=e47]: +
+          - button "USEquity" [ref=e48] [cursor=pointer]:
+            - generic [ref=e50]: USEquity
+            - generic [ref=e51]: +
+          - button "Alpha" [ref=e52] [cursor=pointer]:
+            - generic [ref=e54]: Alpha
+            - generic [ref=e55]: +
+          - button "Optimizer" [ref=e56] [cursor=pointer]:
+            - generic [ref=e58]: Optimizer
+            - generic [ref=e59]: +
+          - button "WeightsDisplay" [ref=e60] [cursor=pointer]:
+            - generic [ref=e62]: WeightsDisplay
+            - generic [ref=e63]: +
+          - button "Covariance" [ref=e64] [cursor=pointer]:
+            - generic [ref=e66]: Covariance
+            - generic [ref=e67]: +
+        - generic [ref=e68]:
+          - generic [ref=e69]: Click to add · drag ports to wire
+          - generic [ref=e70]: ⌘S save
+      - separator "Resize node palette" [ref=e71]
+      - generic [ref=e72]:
+        - generic: unified graph · 9 nodes · 13 edges
+  - alert [ref=e3]
