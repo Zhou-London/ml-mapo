@@ -24,6 +24,7 @@ export interface GraphNode {
   params?: Record<string, unknown>;
   pos?: [number, number];
   size?: [number, number];
+  disabled?: boolean;
 }
 
 export interface GraphEdge {

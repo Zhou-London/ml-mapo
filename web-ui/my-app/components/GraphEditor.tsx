@@ -14,6 +14,7 @@ import { LGraph, LGraphCanvas, LiteGraph } from "@comfyorg/litegraph";
 import type { GraphDoc, NodeSchema, RunResult } from "@/lib/types";
 import {
   NODE_ACTIVE_KEY,
+  NODE_DISABLED_KEY,
   NODE_ID_KEY,
   NODE_MS_KEY,
   WIRE_COLORS,
@@ -59,13 +60,16 @@ interface CanvasThemePalette {
 type NodeCategory = "data" | "forecast" | "risk" | "opt" | "general";
 
 const SIDEBAR_WIDTH_KEY = "mapo.sidebar.width";
+const INSPECTOR_WIDTH_KEY = "mapo.inspector.width";
 const THEME_KEY = "mapo.editor.theme";
 const PALETTE_OPEN_KEY = "mapo.palette.open";
 const INSPECTOR_OPEN_KEY = "mapo.inspector.open";
 const SIDEBAR_MIN = 220;
 const SIDEBAR_MAX = 520;
 const SIDEBAR_DEFAULT = 276;
-const INSPECTOR_WIDTH = 340;
+const INSPECTOR_MIN = 240;
+const INSPECTOR_MAX = 560;
+const INSPECTOR_DEFAULT = 320;
 
 const CANVAS_THEME: Record<ThemeMode, CanvasThemePalette> = {
   dark: {
@@ -130,6 +134,14 @@ export default function GraphEditor() {
   const [runResult, setRunResult] = useState<RunResult | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(true);
   const [inspectorOpen, setInspectorOpen] = useState(true);
+  const [inspectorWidth, setInspectorWidth] = useState(() => {
+    if (typeof window === "undefined") return INSPECTOR_DEFAULT;
+    const raw = window.localStorage.getItem(INSPECTOR_WIDTH_KEY);
+    const n = raw == null ? NaN : Number(raw);
+    return Number.isFinite(n) && n > 0
+      ? clamp(n, INSPECTOR_MIN, INSPECTOR_MAX)
+      : INSPECTOR_DEFAULT;
+  });
   const [selectedNode, setSelectedNode] =
     useState<import("@comfyorg/litegraph").LGraphNode | null>(null);
   const [inspectorRev, setInspectorRev] = useState(0);
@@ -139,7 +151,7 @@ export default function GraphEditor() {
   const workspaceRef = useRef<HTMLElement | null>(null);
   const lgRef = useRef<LGContextHandles | null>(null);
   const schemasRef = useRef<NodeSchema[] | null>(null);
-  const resizingRef = useRef(false);
+  const resizingRef = useRef<"palette" | "inspector" | null>(null);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -273,6 +285,11 @@ export default function GraphEditor() {
     if (typeof window === "undefined") return;
     window.localStorage.setItem(SIDEBAR_WIDTH_KEY, String(Math.round(sidebarWidth)));
   }, [sidebarWidth]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(INSPECTOR_WIDTH_KEY, String(Math.round(inspectorWidth)));
+  }, [inspectorWidth]);
 
   const persistCurrentGraph = useCallback(async () => {
     const handles = lgRef.current;
@@ -423,6 +440,16 @@ export default function GraphEditor() {
     [selectedNode],
   );
 
+  const toggleNodeDisabled = useCallback(() => {
+    const handles = lgRef.current;
+    if (!handles || !selectedNode) return;
+    const n = selectedNode as unknown as Record<string, unknown>;
+    n[NODE_DISABLED_KEY] = !n[NODE_DISABLED_KEY];
+    handles.canvas.setDirty(true, true);
+    setDirty(true);
+    setInspectorRev((r) => r + 1);
+  }, [selectedNode]);
+
   const togglePalette = useCallback(() => setPaletteOpen((open) => !open), []);
   const toggleInspector = useCallback(() => setInspectorOpen((open) => !open), []);
   const closeRunResult = useCallback(() => setRunResult(null), []);
@@ -453,30 +480,45 @@ export default function GraphEditor() {
     setTheme((current) => (current === "dark" ? "light" : "dark"));
   }, []);
 
-  const startSidebarResize = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
-    event.preventDefault();
-    resizingRef.current = true;
-    event.currentTarget.setPointerCapture(event.pointerId);
-    document.body.style.cursor = "col-resize";
-    document.body.style.userSelect = "none";
-  }, []);
+  const startResize = useCallback(
+    (target: "palette" | "inspector") =>
+      (event: React.PointerEvent<HTMLDivElement>) => {
+        event.preventDefault();
+        resizingRef.current = target;
+        event.currentTarget.setPointerCapture(event.pointerId);
+        document.body.style.cursor = "col-resize";
+        document.body.style.userSelect = "none";
+      },
+    [],
+  );
 
   useEffect(() => {
     function stopResize() {
       if (!resizingRef.current) return;
-      resizingRef.current = false;
+      resizingRef.current = null;
       document.body.style.cursor = "";
       document.body.style.userSelect = "";
     }
 
     function onPointerMove(event: PointerEvent) {
-      if (!resizingRef.current) return;
+      const target = resizingRef.current;
+      if (!target) return;
       const workspace = workspaceRef.current;
       if (!workspace) return;
       const rect = workspace.getBoundingClientRect();
-      const maxWidth = Math.min(SIDEBAR_MAX, Math.max(SIDEBAR_MIN, rect.width - 320));
-      const next = clamp(event.clientX - rect.left, SIDEBAR_MIN, maxWidth);
-      setSidebarWidth(next);
+      if (target === "palette") {
+        const maxWidth = Math.min(
+          SIDEBAR_MAX,
+          Math.max(SIDEBAR_MIN, rect.width - 320),
+        );
+        setSidebarWidth(clamp(event.clientX - rect.left, SIDEBAR_MIN, maxWidth));
+      } else {
+        const maxWidth = Math.min(
+          INSPECTOR_MAX,
+          Math.max(INSPECTOR_MIN, rect.width - 320),
+        );
+        setInspectorWidth(clamp(rect.right - event.clientX, INSPECTOR_MIN, maxWidth));
+      }
     }
 
     window.addEventListener("pointermove", onPointerMove);
@@ -571,7 +613,8 @@ export default function GraphEditor() {
     paletteOpen ? "var(--sidebar-width)" : null,
     paletteOpen ? "10px" : null,
     "1fr",
-    inspectorOpen ? `${INSPECTOR_WIDTH}px` : null,
+    inspectorOpen ? "10px" : null,
+    inspectorOpen ? "var(--inspector-width)" : null,
   ]
     .filter(Boolean)
     .join(" ");
@@ -634,6 +677,7 @@ export default function GraphEditor() {
         className="editor-workspace"
         style={{
           ["--sidebar-width" as string]: `${sidebarWidth}px`,
+          ["--inspector-width" as string]: `${inspectorWidth}px`,
           ["--grid-cols" as string]: gridCols,
         }}
       >
@@ -703,7 +747,7 @@ export default function GraphEditor() {
           role="separator"
           aria-orientation="vertical"
           aria-label="Resize node palette"
-          onPointerDown={startSidebarResize}
+          onPointerDown={startResize("palette")}
           onDoubleClick={() => setSidebarWidth(SIDEBAR_DEFAULT)}
           title="Drag to resize the node palette"
         />
@@ -753,10 +797,23 @@ export default function GraphEditor() {
         </section>
 
         {inspectorOpen ? (
+          <div
+            className="editor-resizer"
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="Resize inspector"
+            onPointerDown={startResize("inspector")}
+            onDoubleClick={() => setInspectorWidth(INSPECTOR_DEFAULT)}
+            title="Drag to resize the inspector"
+          />
+        ) : null}
+
+        {inspectorOpen ? (
           <NodeInspector
             node={selectedNode}
             rev={inspectorRev}
             onChangeParam={updateNodeParam}
+            onToggleDisabled={toggleNodeDisabled}
             onClose={toggleInspector}
           />
         ) : null}
@@ -769,10 +826,19 @@ interface NodeInspectorProps {
   node: import("@comfyorg/litegraph").LGraphNode | null;
   rev: number;
   onChangeParam: (paramName: string, nextValue: unknown) => void;
+  onToggleDisabled: () => void;
   onClose: () => void;
 }
 
-function NodeInspector({ node, onChangeParam, onClose }: NodeInspectorProps) {
+function NodeInspector({
+  node,
+  onChangeParam,
+  onToggleDisabled,
+  onClose,
+}: NodeInspectorProps) {
+  const disabled = !!(node as unknown as Record<string, unknown> | null)?.[
+    NODE_DISABLED_KEY
+  ];
   return (
     <aside className="editor-inspector" aria-label="Node inspector">
       <header className="editor-panel-header">
@@ -808,6 +874,15 @@ function NodeInspector({ node, onChangeParam, onClose }: NodeInspectorProps) {
             <div className="editor-inspector-row">
               <label>type</label>
               <span className="value">{(node as { type?: string }).type ?? ""}</span>
+            </div>
+            <div className="editor-inspector-row">
+              <label>commented</label>
+              <input
+                className="editor-inspector-checkbox"
+                type="checkbox"
+                checked={disabled}
+                onChange={onToggleDisabled}
+              />
             </div>
           </section>
 

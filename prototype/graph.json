@@ -1,21 +1,6 @@
 {
   "nodes": [
     {
-      "id": "display",
-      "type": "opt/WeightsDisplay",
-      "params": {
-        "top": 10
-      },
-      "pos": [
-        1440,
-        270
-      ],
-      "size": [
-        210,
-        60
-      ]
-    },
-    {
       "id": "agg",
       "type": "data/Aggregate",
       "params": {},
@@ -44,21 +29,6 @@
       ]
     },
     {
-      "id": "us",
-      "type": "data/USEquity",
-      "params": {
-        "tickers": "NVDA,AAPL,MSFT,AMZN,GOOGL,META,TSLA,AVGO,COST,NFLX"
-      },
-      "pos": [
-        404,
-        172
-      ],
-      "size": [
-        210,
-        127
-      ]
-    },
-    {
       "id": "date",
       "type": "data/DateRange",
       "params": {
@@ -72,21 +42,6 @@
       "size": [
         210,
         127
-      ]
-    },
-    {
-      "id": "uk",
-      "type": "data/UKEquity",
-      "params": {
-        "tickers": "HSBA.L,BP.L,SHEL.L,AZN.L,ULVR.L"
-      },
-      "pos": [
-        397,
-        384
-      ],
-      "size": [
-        210,
-        133
       ]
     },
     {
@@ -136,6 +91,51 @@
       "size": [
         210,
         151
+      ]
+    },
+    {
+      "id": "weightsdisplay",
+      "type": "opt/WeightsDisplay",
+      "params": {
+        "top": 0
+      },
+      "pos": [
+        1417,
+        251
+      ],
+      "size": [
+        210,
+        60
+      ]
+    },
+    {
+      "id": "uk",
+      "type": "data/UKEquity",
+      "params": {
+        "tickers": "HSBA.L,BP.L,SHEL.L,AZN.L,ULVR.L"
+      },
+      "pos": [
+        397,
+        384
+      ],
+      "size": [
+        210,
+        133
+      ]
+    },
+    {
+      "id": "us",
+      "type": "data/USEquity",
+      "params": {
+        "tickers": "NVDA,AAPL,MSFT,AMZN,GOOGL,META,TSLA,AVGO,COST,NFLX"
+      },
+      "pos": [
+        404,
+        172
+      ],
+      "size": [
+        210,
+        127
       ]
     }
   ],
@@ -215,7 +215,7 @@
     {
       "src_node": "mvo",
       "src_port": "weights",
-      "dst_node": "display",
+      "dst_node": "weightsdisplay",
       "dst_port": "weights"
     }
   ]

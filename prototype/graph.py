@@ -230,10 +230,17 @@ def load_graph(path: str | Path) -> Graph:
 
 
 def load_graph_data(data: dict[str, Any]) -> Graph:
-    """Instantiate and validate a graph from a decoded JSON object."""
+    """Instantiate and validate a graph from a decoded JSON object.
+
+    Nodes with ``"disabled": true`` are dropped here, along with every edge
+    that touches them — they're treated as if they were never in the graph.
+    """
+    disabled = {str(raw["id"]) for raw in data["nodes"] if raw.get("disabled")}
     specs: dict[str, NodeSpec] = {}
     nodes: dict[str, Node] = {}
     for raw in data["nodes"]:
+        if str(raw["id"]) in disabled:
+            continue
         spec = NodeSpec(
             id=str(raw["id"]),
             type=raw["type"],
@@ -253,6 +260,7 @@ def load_graph_data(data: dict[str, Any]) -> Graph:
             dst_port=e["dst_port"],
         )
         for e in data.get("edges", [])
+        if str(e["src_node"]) not in disabled and str(e["dst_node"]) not in disabled
     ]
     graph = Graph(nodes=nodes, edges=edges, specs=specs)
     validate_graph(graph)

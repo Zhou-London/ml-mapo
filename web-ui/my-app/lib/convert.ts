@@ -20,12 +20,16 @@ export const NODE_ID_KEY = "__mapo_id";
 // Per-run state attached by GraphEditor; read by onDrawForeground.
 export const NODE_ACTIVE_KEY = "__mapo_active";
 export const NODE_MS_KEY = "__mapo_ms";
+// User flag — a "commented out" node. Persisted in graph.json; the Python
+// loader drops disabled nodes (and their edges) before validating/executing.
+export const NODE_DISABLED_KEY = "__mapo_disabled";
 
 type MapoLGraphNode = LGraphNode & {
   [SCHEMA_KEY]?: NodeSchema;
   [NODE_ID_KEY]?: string;
   [NODE_ACTIVE_KEY]?: boolean;
   [NODE_MS_KEY]?: number;
+  [NODE_DISABLED_KEY]?: boolean;
 };
 
 export function findMapoNode(graph: LGraph, mapoId: string): LGraphNode | undefined {
@@ -186,6 +190,19 @@ function buildNodeClass(schema: NodeSchema): typeof LGraphNode {
       const [w, h] = (this.size ?? [0, 0]) as [number, number];
       const titleH = LiteGraph.NODE_TITLE_HEIGHT ?? 30;
 
+      if (self[NODE_DISABLED_KEY]) {
+        ctx.save();
+        ctx.fillStyle = "rgba(20, 25, 32, 0.55)";
+        ctx.fillRect(-1, -titleH - 1, w + 2, h + titleH + 2);
+        ctx.fillStyle = "#ffd34d";
+        ctx.font = "bold 11px ui-sans-serif, system-ui, sans-serif";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText("// commented out", w / 2, h / 2);
+        ctx.restore();
+        return; // skip the rest — no point drawing active border or ms
+      }
+
       if (self[NODE_ACTIVE_KEY]) {
         ctx.save();
         ctx.strokeStyle = "#ffd34d";
@@ -262,6 +279,7 @@ export function loadIntoGraph(graph: LGraph, doc: GraphDoc): void {
     if (n.pos) node.pos = [n.pos[0], n.pos[1]];
     if (n.size) node.size = [n.size[0], n.size[1]];
     node[NODE_ID_KEY] = n.id;
+    if (n.disabled) node[NODE_DISABLED_KEY] = true;
 
     // Apply param values onto matching widgets.
     if (n.params && node.widgets) {
@@ -324,6 +342,7 @@ export function saveFromGraph(graph: LGraph): GraphDoc {
       params,
       pos: [Math.round(node.pos?.[0] ?? 0), Math.round(node.pos?.[1] ?? 0)],
       size: [Math.round(node.size?.[0] ?? 0), Math.round(node.size?.[1] ?? 0)],
+      ...(node[NODE_DISABLED_KEY] ? { disabled: true } : {}),
     });
   }
 

@@ -121,6 +121,7 @@ function normalizeGraph(payload: unknown): GraphDoc {
         params: { ...(node.params ?? {}) },
         pos: [Number(node.pos?.[0] ?? 0), Number(node.pos?.[1] ?? 0)],
         size: [Number(node.size?.[0] ?? 0), Number(node.size?.[1] ?? 0)],
+        ...(node.disabled ? { disabled: true } : {}),
       };
     }),
     edges: doc.edges.map((edge) => {
