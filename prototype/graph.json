@@ -62,22 +62,6 @@
       ]
     },
     {
-      "id": "mvo",
-      "type": "opt/Optimizer",
-      "params": {
-        "risk_aversion": 50,
-        "long_only": true
-      },
-      "pos": [
-        1160,
-        270
-      ],
-      "size": [
-        210,
-        151
-      ]
-    },
-    {
       "id": "uk",
       "type": "data/UKEquity",
       "params": {
@@ -108,6 +92,22 @@
       ]
     },
     {
+      "id": "mvo",
+      "type": "opt/Optimizer",
+      "params": {
+        "risk_aversion": 50,
+        "long_only": true
+      },
+      "pos": [
+        1160,
+        270
+      ],
+      "size": [
+        210,
+        151
+      ]
+    },
+    {
       "id": "weightsdisplay",
       "type": "opt/WeightsDisplay",
       "params": {
@@ -120,14 +120,13 @@
       "size": [
         210,
         70
-      ],
-      "disabled": true
+      ]
     },
     {
       "id": "date",
       "type": "data/DateRange",
       "params": {
-        "start_date": "2020-01-01",
+        "start_date": "2025-01-01",
         "end_date": "2026-04-19"
       },
       "pos": [
@@ -212,6 +211,12 @@
       "src_port": "alpha",
       "dst_node": "mvo",
       "dst_port": "alpha"
+    },
+    {
+      "src_node": "mvo",
+      "src_port": "weights",
+      "dst_node": "weightsdisplay",
+      "dst_port": "weights"
     }
   ]
 }
