@@ -1,35 +1,6 @@
 {
   "nodes": [
     {
-      "id": "db",
-      "type": "data/Database",
-      "params": {
-        "url": "postgresql+psycopg2://postgres:password@localhost:6543/postgres"
-      },
-      "pos": [
-        40,
-        300
-      ]
-    },
-    {
-      "id": "fetch",
-      "type": "data/FetchStore",
-      "params": {},
-      "pos": [
-        300,
-        160
-      ]
-    },
-    {
-      "id": "load",
-      "type": "data/SnapshotLoad",
-      "params": {},
-      "pos": [
-        300,
-        360
-      ]
-    },
-    {
       "id": "cov",
       "type": "risk/Covariance",
       "params": {
@@ -38,20 +9,8 @@
         "trading_days": 252
       },
       "pos": [
-        560,
-        300
-      ]
-    },
-    {
-      "id": "alpha",
-      "type": "forecast/Alpha",
-      "params": {
-        "factors": "momentum_12_1",
-        "information_ratios": ""
-      },
-      "pos": [
-        560,
-        520
+        880,
+        170
       ]
     },
     {
@@ -62,70 +21,149 @@
         "long_only": true
       },
       "pos": [
-        1080,
-        390
+        1160,
+        270
       ]
     },
     {
-      "id": "clock",
-      "type": "data/Clock",
+      "id": "alpha",
+      "type": "forecast/Alpha",
       "params": {
+        "factors": "momentum_12_1",
+        "information_ratios": ""
+      },
+      "pos": [
+        880,
+        380
+      ]
+    },
+    {
+      "id": "db",
+      "type": "data/Database",
+      "params": {
+        "url": "postgresql+psycopg2://postgres:password@localhost:6543/postgres"
+      },
+      "pos": [
+        -11,
+        305
+      ]
+    },
+    {
+      "id": "display",
+      "type": "opt/WeightsDisplay",
+      "params": {
+        "top": 10
+      },
+      "pos": [
+        1440,
+        270
+      ]
+    },
+    {
+      "id": "agg",
+      "type": "data/Aggregate",
+      "params": {},
+      "pos": [
+        682,
+        272
+      ]
+    },
+    {
+      "id": "uk",
+      "type": "data/UKEquity",
+      "params": {
+        "tickers": "HSBA.L,BP.L,SHEL.L,AZN.L,ULVR.L"
+      },
+      "pos": [
+        397,
+        384
+      ]
+    },
+    {
+      "id": "us",
+      "type": "data/USEquity",
+      "params": {
+        "tickers": "NVDA,AAPL,MSFT,AMZN,GOOGL,META,TSLA,AVGO,COST,NFLX"
+      },
+      "pos": [
+        404,
+        172
+      ]
+    },
+    {
+      "id": "date",
+      "type": "data/DateRange",
+      "params": {
+        "start_date": "",
+        "end_date": "",
         "lookback_days": 365
       },
       "pos": [
-        40,
-        120
+        -1,
+        97
       ]
     }
   ],
   "edges": [
     {
-      "src_node": "clock",
+      "src_node": "date",
       "src_port": "start",
-      "dst_node": "fetch",
+      "dst_node": "us",
       "dst_port": "start"
     },
     {
-      "src_node": "clock",
+      "src_node": "date",
       "src_port": "end",
-      "dst_node": "fetch",
+      "dst_node": "us",
       "dst_port": "end"
     },
     {
       "src_node": "db",
       "src_port": "engine",
-      "dst_node": "fetch",
+      "dst_node": "us",
       "dst_port": "engine"
     },
     {
-      "src_node": "clock",
+      "src_node": "date",
       "src_port": "start",
-      "dst_node": "load",
+      "dst_node": "uk",
       "dst_port": "start"
     },
     {
-      "src_node": "clock",
+      "src_node": "date",
       "src_port": "end",
-      "dst_node": "load",
+      "dst_node": "uk",
       "dst_port": "end"
     },
     {
       "src_node": "db",
       "src_port": "engine",
-      "dst_node": "load",
+      "dst_node": "uk",
       "dst_port": "engine"
     },
     {
-      "src_node": "load",
-      "src_port": "snapshot",
+      "src_node": "us",
+      "src_port": "frame",
+      "dst_node": "agg",
+      "dst_port": "a"
+    },
+    {
+      "src_node": "uk",
+      "src_port": "frame",
+      "dst_node": "agg",
+      "dst_port": "b"
+    },
+    {
+      "src_node": "agg",
+      "src_port": "frame",
       "dst_node": "cov",
-      "dst_port": "ohlcv"
+      "dst_port": "frame"
     },
     {
-      "src_node": "load",
-      "src_port": "snapshot",
+      "src_node": "agg",
+      "src_port": "frame",
       "dst_node": "alpha",
-      "dst_port": "ohlcv"
+      "dst_port": "frame"
     },
     {
       "src_node": "cov",
@@ -138,6 +176,12 @@
       "src_port": "alpha",
       "dst_node": "mvo",
       "dst_port": "alpha"
+    },
+    {
+      "src_node": "mvo",
+      "src_port": "weights",
+      "dst_node": "display",
+      "dst_port": "weights"
     }
   ]
 }

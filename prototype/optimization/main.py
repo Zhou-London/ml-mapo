@@ -67,3 +67,26 @@ class OptimizerNode(Node):
             options={"ftol": 1e-10, "maxiter": 200},
         )
         return {"weights": pd.Series(result.x, index=tickers)}
+
+
+@register_node("opt/WeightsDisplay")
+class WeightsDisplayNode(Node):
+    """Prints the optimizer's weights to stdout (surfaced in the editor console)."""
+
+    CATEGORY = "opt"
+    INPUTS = {"weights": "weights"}
+    OUTPUTS = {"text": "str"}
+    PARAMS = {"top": ("int", 0)}  # 0 = show all
+
+    def process(self, weights: pd.Series) -> dict:
+        ordered = weights.sort_values(ascending=False)
+        top = int(self.params["top"])
+        if top > 0:
+            ordered = ordered.head(top)
+
+        lines = ["=== Portfolio Weights ==="]
+        lines.extend(f"  {sym:<12s}  {w:>8.4f}" for sym, w in ordered.items())
+        lines.append(f"  {'SUM':<12s}  {float(weights.sum()):>8.4f}")
+        text = "\n".join(lines)
+        print(text)
+        return {"text": text}

@@ -37,10 +37,11 @@ See [doc/v0.1_architecture.md](doc/v0.1_architecture.md) for the v0.1 spec — n
 - **Adding a node type**: subclass `graph.Node`, declare `INPUTS` / `OUTPUTS` / `PARAMS` / `CATEGORY` as class attributes, implement `process(**inputs) -> dict`, and decorate with `@register_node("<module>/TypeName")`. Optional `setup()` / `teardown()` lifecycle hooks. Per-tick metadata (`seq`, `t0`) is passed via `self.ctx`. If the file lives outside one of the directories listed in `node_loader.MODULE_DIRS`, add it there — otherwise the class never registers.
 - **Changing behavior**: edit the node's `params` entry in [prototype/graph.json](prototype/graph.json), or its `Node` subclass if you need new ports. There is no imperative `main()` to patch per module.
 - **On-disk format**: `{nodes: [{id, type, params, pos}], edges: [{src_node, src_port, dst_node, dst_port}]}`. Ports are referenced by name — the JSON is independent of the UI's slot ordering.
+- **Data-node topology**: `data/DateRange` → `(start, end)`; `data/Database` → `Engine`. Per-asset-class nodes (`data/USEquity`, `data/UKEquity`, `data/FX`) take `(engine, start, end)` plus their own `tickers` CSV param, upsert missing bars from yfinance into TimescaleDB, and emit a wide `adj_close` `frame` (index = date, columns = tickers). `data/Aggregate` concatenates two frames column-wise — chain for ≥ 3 asset classes. Risk/forecast nodes consume the wide `frame` directly; there is no `ohlcv_snapshot` dict anymore.
 - **Default factor plugins**:
-  - `RiskFactor` in [prototype/risk/main.py](prototype/risk/main.py) — default `naive_sample_cov` (annualized sample covariance of daily log returns on `adj_close`, lookback 252). Select via the `factor` param on `risk/Covariance`.
-  - `AlphaFactor` in [prototype/forecast/main.py](prototype/forecast/main.py) — default `momentum_12_1`. The `factors` / `information_ratios` params on `forecast/Alpha` accept CSVs; multiple factors combine via IR-weighted z-score rescaling.
-  - Optimization: `opt/Optimizer` runs `scipy.optimize.minimize(SLSQP)` with an analytic gradient; defaults `risk_aversion=50`, `long_only=true`.
+  - `RiskFactor` in [prototype/risk/main.py](prototype/risk/main.py) — default `naive_sample_cov` (annualized sample covariance of daily log returns on `adj_close`, lookback 252). Selected via the `factor` param on `risk/Covariance`. Input port: `frame`.
+  - `AlphaFactor` in [prototype/forecast/main.py](prototype/forecast/main.py) — default `momentum_12_1`. The `factors` / `information_ratios` params on `forecast/Alpha` accept CSVs; multiple factors combine via IR-weighted z-score rescaling. Input port: `frame`.
+  - Optimization: `opt/Optimizer` runs `scipy.optimize.minimize(SLSQP)` with an analytic gradient; defaults `risk_aversion=50`, `long_only=true`. `opt/WeightsDisplay` prints the result to stdout so it shows up in the UI's run console.
 
 ## Web UI (Next.js 16 + LiteGraph)
 

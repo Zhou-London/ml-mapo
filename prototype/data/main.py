@@ -1,4 +1,16 @@
-"""Data node catalog for the unified ML-MAPO graph."""
+"""Data node catalog for the unified ML-MAPO graph.
+
+Layout:
+
+    DateRange ──┐
+                ├─► USEquity ──┐
+    Database ───┤               ├─► Aggregate ──► (frame) downstream
+                └─► UKEquity ──┘
+
+Each asset-class node pulls OHLCV for its own ticker universe, caching rows
+in TimescaleDB and fetching the gap from yfinance when the DB is cold. The
+output is a wide ``adj_close`` frame (index = date, columns = tickers).
+"""
 
 from __future__ import annotations
 
@@ -9,14 +21,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import pandas as pd
-from config import (
-    ASSET_CLASS_EQUITY,
-    ASSET_CLASS_FX,
-    DB_URL,
-    INSTRUMENT_UNIVERSES,
-    LOOKBACK_DAYS,
-    InstrumentUniverse,
-)
+from adaptors import YfAdaptor
 from graph import Node, register_node
 from sqlalchemy import (
     BigInteger,
@@ -37,7 +42,14 @@ from sqlalchemy import (
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
 
-"""--- ORM models start ---"""
+DB_URL = "postgresql+psycopg2://postgres:password@localhost:6543/postgres"
+
+US_EQUITIES_DEFAULT = "NVDA,AAPL,MSFT,AMZN,GOOGL,META,TSLA,AVGO,COST,NFLX"
+UK_EQUITIES_DEFAULT = "HSBA.L,BP.L,SHEL.L,AZN.L,ULVR.L"
+FX_PAIRS_DEFAULT = "EURUSD=X,GBPUSD=X,AUDUSD=X,JPYUSD=X"
+
+
+# ---------- ORM ----------
 
 
 class Base(DeclarativeBase):
@@ -45,52 +57,23 @@ class Base(DeclarativeBase):
 
 
 class Instrument(Base):
-    """Core CTI table storing one row per unique (asset_class, market, symbol) combination."""
-
     __tablename__ = "instruments"
 
-    instrument_id: Mapped[int] = mapped_column(
-        Integer, primary_key=True, autoincrement=True
-    )
+    instrument_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     asset_class: Mapped[str] = mapped_column(String(16), nullable=False)
     market: Mapped[str] = mapped_column(String(16), nullable=False)
     symbol: Mapped[str] = mapped_column(String(32), nullable=False)
-    name: Mapped[str | None] = mapped_column(String(128), nullable=True)
-    currency: Mapped[str | None] = mapped_column(String(8), nullable=True)
 
     __table_args__ = (
         UniqueConstraint("asset_class", "market", "symbol", name="uq_instruments_key"),
     )
 
 
-class EquityDetail(Base):
-    __tablename__ = "equity_details"
-
-    instrument_id: Mapped[int] = mapped_column(
-        ForeignKey("instruments.instrument_id", ondelete="CASCADE"),
-        primary_key=True,
-    )
-
-
-class FxDetail(Base):
-    __tablename__ = "fx_details"
-
-    instrument_id: Mapped[int] = mapped_column(
-        ForeignKey("instruments.instrument_id", ondelete="CASCADE"),
-        primary_key=True,
-    )
-    base_currency: Mapped[str] = mapped_column(String(8), nullable=False)
-    quote_currency: Mapped[str] = mapped_column(String(8), nullable=False)
-
-
 class OHLCV(Base):
-    """Daily OHLCV bar keyed by (instrument_id, ts). ``ts`` is the hypertable partition column."""
-
     __tablename__ = "ohlcv"
 
     instrument_id: Mapped[int] = mapped_column(
-        ForeignKey("instruments.instrument_id", ondelete="CASCADE"),
-        primary_key=True,
+        ForeignKey("instruments.instrument_id", ondelete="CASCADE"), primary_key=True
     )
     ts: Mapped[date] = mapped_column(Date, primary_key=True)
     open: Mapped[float] = mapped_column(Float, nullable=False)
@@ -101,150 +84,75 @@ class OHLCV(Base):
     volume: Mapped[int] = mapped_column(BigInteger, nullable=False)
 
 
-"""--- ORM models end ---"""
+# ---------- Helpers ----------
 
 
-"""--- Graph nodes start ---"""
+def _split_csv(value: str) -> list[str]:
+    return [s.strip() for s in str(value).split(",") if s.strip()]
 
 
-@register_node("data/Clock")
-class ClockNode(Node):
-    """Emits the rolling ``[start, end]`` window each tick."""
+def _ensure_instrument(
+    session: Session, asset_class: str, market: str, symbol: str
+) -> int:
+    existing = session.execute(
+        select(Instrument).where(
+            and_(
+                Instrument.asset_class == asset_class,
+                Instrument.market == market,
+                Instrument.symbol == symbol,
+            )
+        )
+    ).scalar_one_or_none()
+    if existing is not None:
+        return existing.instrument_id
+    inst = Instrument(asset_class=asset_class, market=market, symbol=symbol)
+    session.add(inst)
+    session.flush()
+    return inst.instrument_id
 
-    CATEGORY = "data"
-    OUTPUTS = {"start": "date", "end": "date"}
-    PARAMS = {"lookback_days": ("int", LOOKBACK_DAYS)}
 
-    def process(self) -> dict:
-        end = date.today()
-        start = end - timedelta(days=int(self.params["lookback_days"]))
-        return {"start": start, "end": end}
+def _fetch_or_load(
+    engine: Engine,
+    asset_class: str,
+    market: str,
+    tickers: list[str],
+    start: date,
+    end: date,
+) -> pd.DataFrame:
+    """Return a wide adj_close frame for ``tickers`` in ``[start, end]``.
 
+    Missing bars are fetched from yfinance and upserted into the DB so that
+    subsequent ticks for the same window hit the cache.
+    """
+    if not tickers:
+        return pd.DataFrame()
 
-@register_node("data/Database")
-class DatabaseNode(Node):
-    """Creates the SQLAlchemy engine and ensures the schema + hypertable exist."""
+    session_factory = sessionmaker(bind=engine, future=True)
+    with session_factory() as session:
+        ids = {s: _ensure_instrument(session, asset_class, market, s) for s in tickers}
+        session.commit()
 
-    CATEGORY = "data"
-    OUTPUTS = {"engine": "Engine"}
-    PARAMS = {"url": ("str", DB_URL)}
-
-    def setup(self) -> None:
-        self._engine = self._build_engine()
-
-    def process(self) -> dict:
-        return {"engine": self._engine}
-
-    def _build_engine(self) -> Engine:
-        engine = create_engine(self.params["url"], future=True)
-        if not self._schema_matches(engine):
-            with engine.begin() as conn:
-                for table in reversed(Base.metadata.sorted_tables):
-                    conn.execute(
-                        text(f"DROP TABLE IF EXISTS {table.name} CASCADE;")
+        last_ts = dict(
+            session.execute(
+                select(OHLCV.instrument_id, func.max(OHLCV.ts))
+                .where(
+                    and_(
+                        OHLCV.instrument_id.in_(ids.values()),
+                        OHLCV.ts <= end,
                     )
-
-        Base.metadata.create_all(engine)
-        with engine.begin() as conn:
-            conn.execute(
-                text(
-                    "SELECT create_hypertable('ohlcv', 'ts', "
-                    "if_not_exists => TRUE, migrate_data => TRUE);"
                 )
-            )
-        return engine
+                .group_by(OHLCV.instrument_id)
+            ).all()
+        )
 
-    @staticmethod
-    def _schema_matches(engine: Engine) -> bool:
-        inspector = inspect(engine)
-        existing = set(inspector.get_table_names())
-        for table in Base.metadata.sorted_tables:
-            if table.name not in existing:
-                return False
-            expected = {c.name for c in table.columns}
-            actual = {c["name"] for c in inspector.get_columns(table.name)}
-            if expected != actual:
-                return False
-        return True
-
-
-@register_node("data/FetchStore")
-class FetchStoreNode(Node):
-    """Pulls OHLCV bars from each universe's adaptor and upserts them into the DB."""
-
-    CATEGORY = "data"
-    INPUTS = {"engine": "Engine", "start": "date", "end": "date"}
-    OUTPUTS = {"stats": "dict"}
-
-    def setup(self) -> None:
-        self._session_factory: sessionmaker | None = None
-        self._universes: list[InstrumentUniverse] = list(INSTRUMENT_UNIVERSES)
-
-    def process(self, engine: Engine, start: date, end: date) -> dict:
-        if self._session_factory is None:
-            self._session_factory = sessionmaker(bind=engine, future=True)
-        total = {"cached": 0, "fetched": 0, "upserted": 0, "warnings": 0, "errors": 0}
-        for universe in self._universes:
-            stats = self._fetch_universe(universe, start, end)
-            for k, v in stats.items():
-                total[k] = total.get(k, 0) + v
-        return {"stats": total}
-
-    def _fetch_universe(
-        self, universe: InstrumentUniverse, start: date, end: date
-    ) -> dict[str, int]:
-        stats = {"cached": 0, "fetched": 0, "upserted": 0, "warnings": 0, "errors": 0}
-        assert self._session_factory is not None
-
-        with self._session_factory() as session:
-            ids = {
-                s: self._ensure_instrument(session, universe, s)
-                for s in universe.tickers
-            }
-            session.commit()
-
-            last_ts = dict(
-                session.execute(
-                    select(OHLCV.instrument_id, func.max(OHLCV.ts))
-                    .where(
-                        and_(
-                            OHLCV.instrument_id.in_(ids.values()),
-                            OHLCV.ts >= start,
-                            OHLCV.ts <= end,
-                        )
-                    )
-                    .group_by(OHLCV.instrument_id)
-                ).all()
-            )
-
-            to_fetch: list[tuple[str, int]] = []
-            fetch_windows: list[date] = []
-            for symbol, iid in ids.items():
-                prev = last_ts.get(iid)
-                if prev is not None and prev >= end:
-                    stats["cached"] += 1
-                    continue
-                to_fetch.append((symbol, iid))
-                fetch_windows.append(prev + timedelta(days=1) if prev else start)
-
-            if not to_fetch:
-                return stats
-
-            symbols = [s for s, _ in to_fetch]
-            batch_start = min(fetch_windows)
-
-            try:
-                result = universe.adaptor.fetch_ohlcv_many(symbols, batch_start, end)
-            except Exception:
-                stats["errors"] += len(symbols)
-                return stats
-
-            stats["fetched"] = len(to_fetch)
-            for symbol, iid in to_fetch:
-                df = result.get(symbol)
+        to_fetch = [s for s in tickers if (last_ts.get(ids[s]) or date.min) < end]
+        if to_fetch:
+            fetched = YfAdaptor().fetch_ohlcv_many(to_fetch, start, end)
+            for symbol in to_fetch:
+                df = fetched.get(symbol)
                 if df is None or df.empty:
-                    stats["warnings"] += 1
                     continue
+                iid = ids[symbol]
                 for ts, row in df.iterrows():
                     session.merge(
                         OHLCV(
@@ -258,130 +166,156 @@ class FetchStoreNode(Node):
                             volume=int(row["Volume"]),
                         )
                     )
-                stats["upserted"] += len(df)
-
             session.commit()
 
-        return stats
-
-    def _ensure_instrument(
-        self, session: Session, universe: InstrumentUniverse, symbol: str
-    ) -> int:
-        existing = session.execute(
-            select(Instrument).where(
+        rows = session.execute(
+            select(Instrument.symbol, OHLCV.ts, OHLCV.adj_close)
+            .join(OHLCV, OHLCV.instrument_id == Instrument.instrument_id)
+            .where(
                 and_(
-                    Instrument.asset_class == universe.asset_class,
-                    Instrument.market == universe.market,
-                    Instrument.symbol == symbol,
+                    Instrument.instrument_id.in_(ids.values()),
+                    OHLCV.ts >= start,
+                    OHLCV.ts <= end,
                 )
             )
-        ).scalar_one_or_none()
-        if existing is not None:
-            return existing.instrument_id
+            .order_by(OHLCV.ts, Instrument.symbol)
+        ).all()
 
-        currency: str | None = None
-        if universe.asset_class == ASSET_CLASS_FX:
-            _, currency = self._parse_fx_symbol(symbol)
+    if not rows:
+        return pd.DataFrame()
+    long = pd.DataFrame(rows, columns=["symbol", "ts", "adj_close"])
+    return long.pivot(index="ts", columns="symbol", values="adj_close").sort_index()
 
-        instrument = Instrument(
-            asset_class=universe.asset_class,
-            market=universe.market,
-            symbol=symbol,
-            currency=currency,
-        )
-        session.add(instrument)
-        session.flush()
 
-        if universe.asset_class == ASSET_CLASS_EQUITY:
-            detail: EquityDetail | FxDetail = EquityDetail(
-                instrument_id=instrument.instrument_id
-            )
-        elif universe.asset_class == ASSET_CLASS_FX:
-            base, quote = self._parse_fx_symbol(symbol)
-            detail = FxDetail(
-                instrument_id=instrument.instrument_id,
-                base_currency=base,
-                quote_currency=quote,
-            )
+# ---------- Nodes ----------
+
+
+@register_node("data/DateRange")
+class DateRangeNode(Node):
+    """Emits a ``[start, end]`` date window each tick."""
+
+    CATEGORY = "data"
+    OUTPUTS = {"start": "date", "end": "date"}
+    PARAMS = {
+        "start_date": ("str", ""),  # ISO; blank → end - lookback_days
+        "end_date": ("str", ""),    # ISO; blank → today
+        "lookback_days": ("int", 365),
+    }
+
+    def process(self) -> dict:
+        end_str = str(self.params["end_date"]).strip()
+        start_str = str(self.params["start_date"]).strip()
+        end = date.fromisoformat(end_str) if end_str else date.today()
+        if start_str:
+            start = date.fromisoformat(start_str)
         else:
-            raise ValueError(f"unknown asset_class: {universe.asset_class!r}")
-        session.add(detail)
-        return instrument.instrument_id
+            start = end - timedelta(days=int(self.params["lookback_days"]))
+        return {"start": start, "end": end}
+
+
+@register_node("data/Database")
+class DatabaseNode(Node):
+    """Builds the SQLAlchemy engine and ensures the schema + hypertable exist."""
+
+    CATEGORY = "data"
+    OUTPUTS = {"engine": "Engine"}
+    PARAMS = {"url": ("str", DB_URL)}
+
+    def setup(self) -> None:
+        self._engine = create_engine(self.params["url"], future=True)
+        self._reset_if_stale(self._engine)
+        Base.metadata.create_all(self._engine)
+        with self._engine.begin() as conn:
+            conn.execute(
+                text(
+                    "SELECT create_hypertable('ohlcv', 'ts', "
+                    "if_not_exists => TRUE, migrate_data => TRUE);"
+                )
+            )
+
+    def process(self) -> dict:
+        return {"engine": self._engine}
 
     @staticmethod
-    def _parse_fx_symbol(symbol: str) -> tuple[str, str]:
-        core = symbol.removesuffix("=X")
-        if len(core) != 6:
-            raise ValueError(
-                f"cannot parse FX symbol {symbol!r}: expected 6-letter base+quote "
-                "(yfinance format like 'EURUSD=X')"
-            )
-        return core[:3], core[3:]
+    def _reset_if_stale(engine: Engine) -> None:
+        """Drop every ORM-managed table if the on-disk schema doesn't match.
+
+        Keeps the refactor simple: we don't try to migrate old columns, we just
+        rebuild the schema. Only touches tables this module owns.
+        """
+        inspector = inspect(engine)
+        existing = set(inspector.get_table_names())
+        stale = False
+        for table in Base.metadata.sorted_tables:
+            if table.name not in existing:
+                continue
+            expected = {c.name for c in table.columns}
+            actual = {c["name"] for c in inspector.get_columns(table.name)}
+            if expected != actual:
+                stale = True
+                break
+        # Also reset if old subclass tables from earlier schema still exist.
+        legacy = {"equity_details", "fx_details"} & existing
+        if stale or legacy:
+            with engine.begin() as conn:
+                for name in list(legacy) + [t.name for t in reversed(Base.metadata.sorted_tables)]:
+                    conn.execute(text(f"DROP TABLE IF EXISTS {name} CASCADE;"))
 
 
-@register_node("data/SnapshotLoad")
-class SnapshotLoadNode(Node):
-    """Reads stored OHLCV back out as a ``label → DataFrame`` snapshot."""
+class _AssetNode(Node):
+    """Base class shared by the per-asset-class nodes."""
 
     CATEGORY = "data"
     INPUTS = {"engine": "Engine", "start": "date", "end": "date"}
-    OUTPUTS = {"snapshot": "ohlcv_snapshot"}
-
-    def setup(self) -> None:
-        self._session_factory: sessionmaker | None = None
-        self._universes: list[InstrumentUniverse] = list(INSTRUMENT_UNIVERSES)
+    OUTPUTS = {"frame": "frame"}
+    ASSET_CLASS: str = ""
+    MARKET: str = ""
 
     def process(self, engine: Engine, start: date, end: date) -> dict:
-        if self._session_factory is None:
-            self._session_factory = sessionmaker(bind=engine, future=True)
-        snapshot: dict[str, pd.DataFrame] = {}
-        with self._session_factory() as session:
-            for universe in self._universes:
-                for symbol in universe.tickers:
-                    inst = session.execute(
-                        select(Instrument).where(
-                            and_(
-                                Instrument.asset_class == universe.asset_class,
-                                Instrument.market == universe.market,
-                                Instrument.symbol == symbol,
-                            )
-                        )
-                    ).scalar_one_or_none()
-                    if inst is None:
-                        continue
-                    rows = (
-                        session.execute(
-                            select(OHLCV)
-                            .where(
-                                and_(
-                                    OHLCV.instrument_id == inst.instrument_id,
-                                    OHLCV.ts >= start,
-                                    OHLCV.ts <= end,
-                                )
-                            )
-                            .order_by(OHLCV.ts)
-                        )
-                        .scalars()
-                        .all()
-                    )
-                    if len(rows) < 2:
-                        continue
-                    closes = [r.adj_close for r in rows]
-                    if min(closes) == max(closes):
-                        continue
-                    label = f"{universe.market}:{symbol}"
-                    snapshot[label] = pd.DataFrame(
-                        [
-                            {
-                                "ts": r.ts,
-                                "open": r.open,
-                                "high": r.high,
-                                "low": r.low,
-                                "close": r.close,
-                                "adj_close": r.adj_close,
-                                "volume": r.volume,
-                            }
-                            for r in rows
-                        ]
-                    ).set_index("ts")
-        return {"snapshot": snapshot}
+        tickers = _split_csv(self.params["tickers"])
+        frame = _fetch_or_load(engine, self.ASSET_CLASS, self.MARKET, tickers, start, end)
+        return {"frame": frame}
+
+
+@register_node("data/USEquity")
+class USEquityNode(_AssetNode):
+    """US-listed equities via yfinance (e.g. NVDA, AAPL)."""
+
+    ASSET_CLASS = "EQUITY"
+    MARKET = "US"
+    PARAMS = {"tickers": ("str", US_EQUITIES_DEFAULT)}
+
+
+@register_node("data/UKEquity")
+class UKEquityNode(_AssetNode):
+    """LSE-listed equities via yfinance (suffix ``.L``)."""
+
+    ASSET_CLASS = "EQUITY"
+    MARKET = "UK"
+    PARAMS = {"tickers": ("str", UK_EQUITIES_DEFAULT)}
+
+
+@register_node("data/FX")
+class FXNode(_AssetNode):
+    """FX pairs via yfinance (suffix ``=X``)."""
+
+    ASSET_CLASS = "FX"
+    MARKET = "FX"
+    PARAMS = {"tickers": ("str", FX_PAIRS_DEFAULT)}
+
+
+@register_node("data/Aggregate")
+class AggregateNode(Node):
+    """Concatenates two asset-class frames column-wise into one frame.
+
+    Chain multiple Aggregates to combine more than two asset classes.
+    """
+
+    CATEGORY = "data"
+    INPUTS = {"a": "frame", "b": "frame"}
+    OUTPUTS = {"frame": "frame"}
+
+    def process(self, a: pd.DataFrame, b: pd.DataFrame) -> dict:
+        combined = pd.concat([a, b], axis=1).sort_index()
+        combined = combined.loc[:, ~combined.columns.duplicated()]
+        return {"frame": combined}

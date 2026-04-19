@@ -18,28 +18,22 @@ class AlphaFactor(ABC):
     name: str = "alpha_factor"
 
     @abstractmethod
-    def score(self, ohlcv: dict[str, pd.DataFrame]) -> pd.Series: ...
+    def score(self, frame: pd.DataFrame) -> pd.Series: ...
 
 
 class NaiveMomentumAlpha(AlphaFactor):
-    """Example momentum factor: 12-month minus 1-month returns."""
+    """12-month minus 1-month mean-return momentum on ``adj_close``."""
 
     name = "momentum_12_1"
 
-    def __init__(
-        self, lookback: int = 252, skip: int = 21, trading_days: int = 252
-    ) -> None:
+    def __init__(self, lookback: int = 252, skip: int = 21, trading_days: int = 252) -> None:
         self.lookback = lookback
         self.skip = skip
         self.trading_days = trading_days
 
-    def score(self, ohlcv: dict[str, pd.DataFrame]) -> pd.Series:
-        closes = (
-            pd.concat({t: df["adj_close"] for t, df in ohlcv.items()}, axis=1)
-            .sort_index()
-            .dropna(how="all")
-        )
-        returns = np.log(closes / closes.shift(1)).dropna()
+    def score(self, frame: pd.DataFrame) -> pd.Series:
+        prices = frame.sort_index().dropna(axis=1, how="all")
+        returns = np.log(prices / prices.shift(1)).dropna(how="all")
         if self.skip > 0:
             window = returns.iloc[-self.lookback : -self.skip]
         else:
@@ -57,7 +51,7 @@ class AlphaNode(Node):
     """Scores each configured AlphaFactor, then IR-weighted combines their z-scores."""
 
     CATEGORY = "forecast"
-    INPUTS = {"ohlcv": "ohlcv_snapshot"}
+    INPUTS = {"frame": "frame"}
     OUTPUTS = {"alpha": "alpha_series"}
     PARAMS = {
         "factors": ("str", NaiveMomentumAlpha.name),
@@ -79,8 +73,8 @@ class AlphaNode(Node):
         else:
             self._information_ratios = {n: 1.0 for n in names}
 
-    def process(self, ohlcv: dict[str, pd.DataFrame]) -> dict:
-        scores = {f.name: f.score(ohlcv) for f in self._factors}
+    def process(self, frame: pd.DataFrame) -> dict:
+        scores = {f.name: f.score(frame) for f in self._factors}
         return {"alpha": self._ir_weighted_combine(scores)}
 
     def _ir_weighted_combine(self, scores: dict[str, pd.Series]) -> pd.Series:

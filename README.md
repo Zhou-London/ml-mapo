@@ -81,6 +81,23 @@ Node classes still live in the module folders:
 
 Those files are now node catalogs, not standalone pipeline runners.
 
+### Node catalog
+
+| Type                  | Inputs                      | Output          | Notes |
+| --------------------- | --------------------------- | --------------- | ----- |
+| `data/DateRange`      | —                           | `start`, `end`  | Blank date params fall back to `[today − lookback_days, today]`. |
+| `data/Database`       | —                           | `engine`        | Owns the SQLAlchemy engine and the `ohlcv` hypertable. |
+| `data/USEquity`       | `engine`, `start`, `end`    | `frame`         | US equities (yfinance). |
+| `data/UKEquity`       | `engine`, `start`, `end`    | `frame`         | LSE equities (yfinance, `.L` suffix). |
+| `data/FX`             | `engine`, `start`, `end`    | `frame`         | FX pairs (yfinance, `=X` suffix). |
+| `data/Aggregate`      | `a`, `b` (`frame`)          | `frame`         | Column-wise concat; chain for ≥ 3 asset classes. |
+| `risk/Covariance`     | `frame`                     | `cov`           | Defaults to annualized sample covariance (`naive_sample_cov`). |
+| `forecast/Alpha`      | `frame`                     | `alpha`         | Defaults to 12-1 momentum; IR-weighted z-score blending across factors. |
+| `opt/Optimizer`       | `cov`, `alpha`              | `weights`       | SLSQP mean-variance, long-only by default. |
+| `opt/WeightsDisplay`  | `weights`                   | `text`          | Pretty-prints the weights to stdout (visible in the UI run console). |
+
+The `frame` port type is a wide `pandas.DataFrame` indexed by date with tickers as columns (values are `adj_close`). Asset-class nodes upsert missing bars from yfinance into TimescaleDB before returning.
+
 ### Validation rules
 
 The runtime rejects illegal graphs before execution:

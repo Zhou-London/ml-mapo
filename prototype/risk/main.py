@@ -15,16 +15,16 @@ from graph import Node, register_node
 
 
 class RiskFactor(ABC):
-    """Interface: take {ticker: OHLCV} and return an (n×n) covariance matrix."""
+    """Interface: take a wide adj_close frame and return an (n×n) covariance matrix."""
 
     name: str = "risk_factor"
 
     @abstractmethod
-    def covariance(self, ohlcv: dict[str, pd.DataFrame]) -> pd.DataFrame: ...
+    def covariance(self, frame: pd.DataFrame) -> pd.DataFrame: ...
 
 
 class NaiveRiskFactor(RiskFactor):
-    """Sample risk factor: annualized sample covariance of daily log returns."""
+    """Annualized sample covariance of daily log returns on ``adj_close``."""
 
     name = "naive_sample_cov"
 
@@ -32,13 +32,9 @@ class NaiveRiskFactor(RiskFactor):
         self.lookback = lookback
         self.trading_days = trading_days
 
-    def covariance(self, ohlcv: dict[str, pd.DataFrame]) -> pd.DataFrame:
-        closes = (
-            pd.concat({t: df["adj_close"] for t, df in ohlcv.items()}, axis=1)
-            .sort_index()
-            .dropna(how="all")
-        )
-        returns = np.log(closes / closes.shift(1)).dropna()
+    def covariance(self, frame: pd.DataFrame) -> pd.DataFrame:
+        prices = frame.sort_index().dropna(axis=1, how="all")
+        returns = np.log(prices / prices.shift(1)).dropna(how="all")
         return returns.iloc[-self.lookback :].cov() * self.trading_days
 
 
@@ -49,10 +45,10 @@ _RISK_FACTORS: dict[str, type[RiskFactor]] = {
 
 @register_node("risk/Covariance")
 class CovarianceNode(Node):
-    """Applies a RiskFactor to an OHLCV snapshot."""
+    """Applies a RiskFactor to a wide adj_close frame."""
 
     CATEGORY = "risk"
-    INPUTS = {"ohlcv": "ohlcv_snapshot"}
+    INPUTS = {"frame": "frame"}
     OUTPUTS = {"cov": "covariance"}
     PARAMS = {
         "factor": ("str", NaiveRiskFactor.name),
@@ -67,5 +63,5 @@ class CovarianceNode(Node):
             trading_days=int(self.params["trading_days"]),
         )
 
-    def process(self, ohlcv: dict[str, pd.DataFrame]) -> dict:
-        return {"cov": self._factor.covariance(ohlcv)}
+    def process(self, frame: pd.DataFrame) -> dict:
+        return {"cov": self._factor.covariance(frame)}

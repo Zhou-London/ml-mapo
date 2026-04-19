@@ -26,7 +26,7 @@ TimescaleDB is hard-coded at:
 
 - `postgresql+psycopg2://postgres:password@localhost:6543/postgres`
 
-See [prototype/data/config.py](prototype/data/config.py).
+The URL lives on the `data/Database` node in [prototype/graph.json](prototype/graph.json) (override via the node's `url` param). The `ohlcv` table is promoted to a hypertable on `ts`, and the `Database` node drops+recreates tables if the on-disk schema drifts.
 
 ## Runtime Architecture
 
@@ -78,7 +78,16 @@ Default factor implementations:
 
 - [prototype/risk/main.py](prototype/risk/main.py) — `risk/Covariance` defaults to `NaiveRiskFactor`
 - [prototype/forecast/main.py](prototype/forecast/main.py) — `forecast/Alpha` defaults to `NaiveMomentumAlpha`
-- [prototype/optimization/main.py](prototype/optimization/main.py) — `opt/Optimizer` uses SLSQP with analytic gradient
+- [prototype/optimization/main.py](prototype/optimization/main.py) — `opt/Optimizer` uses SLSQP with analytic gradient; `opt/WeightsDisplay` pretty-prints the result to stdout (surfaced in the editor run console)
+
+### Data-node layout
+
+- `data/DateRange` — emits `(start, end)`. Blank dates fall back to `end = today`, `start = end − lookback_days`.
+- `data/Database` — owns the SQLAlchemy engine, schema, and hypertable. Outputs an `Engine` handle.
+- `data/USEquity` / `data/UKEquity` / `data/FX` — one node per asset class, each with a `tickers` CSV param. Given `engine + start + end`, they upsert any missing bars from yfinance and emit a wide `adj_close` `frame` (index = date, columns = tickers).
+- `data/Aggregate` — concatenates two `frame`s column-wise. Chain multiple Aggregates for ≥ 3 asset classes.
+
+Downstream risk/forecast nodes consume the wide `frame` directly — the old `ohlcv_snapshot` dict format is gone.
 
 ## Web UI
 
