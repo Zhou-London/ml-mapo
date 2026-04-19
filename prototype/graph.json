@@ -29,22 +29,6 @@
       ]
     },
     {
-      "id": "date",
-      "type": "data/DateRange",
-      "params": {
-        "start_date": "2025-01-01",
-        "end_date": "2026-04-19"
-      },
-      "pos": [
-        -1,
-        97
-      ],
-      "size": [
-        210,
-        127
-      ]
-    },
-    {
       "id": "alpha",
       "type": "forecast/Alpha",
       "params": {
@@ -138,6 +122,22 @@
         70
       ],
       "disabled": true
+    },
+    {
+      "id": "date",
+      "type": "data/DateRange",
+      "params": {
+        "start_date": "2020-01-01",
+        "end_date": "2026-04-19"
+      },
+      "pos": [
+        -1,
+        97
+      ],
+      "size": [
+        210,
+        127
+      ]
     }
   ],
   "edges": [

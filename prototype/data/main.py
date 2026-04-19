@@ -35,7 +35,6 @@ from sqlalchemy import (
     UniqueConstraint,
     and_,
     create_engine,
-    func,
     inspect,
     select,
     text,
@@ -64,6 +63,11 @@ class Instrument(Base):
     asset_class: Mapped[str] = mapped_column(String(16), nullable=False)
     market: Mapped[str] = mapped_column(String(16), nullable=False)
     symbol: Mapped[str] = mapped_column(String(32), nullable=False)
+    # Window we have already asked the data source adaptor about. Tracking
+    # *what we asked for* (not what came back) is what lets a Saturday/Sunday
+    # request hit the DB instead of yfinance every tick.
+    fetched_start: Mapped[date | None] = mapped_column(Date, nullable=True)
+    fetched_end: Mapped[date | None] = mapped_column(Date, nullable=True)
 
     __table_args__ = (
         UniqueConstraint("asset_class", "market", "symbol", name="uq_instruments_key"),
@@ -94,7 +98,7 @@ def _split_csv(value: str) -> list[str]:
 
 def _ensure_instrument(
     session: Session, asset_class: str, market: str, symbol: str
-) -> int:
+) -> Instrument:
     existing = session.execute(
         select(Instrument).where(
             and_(
@@ -105,11 +109,11 @@ def _ensure_instrument(
         )
     ).scalar_one_or_none()
     if existing is not None:
-        return existing.instrument_id
+        return existing
     inst = Instrument(asset_class=asset_class, market=market, symbol=symbol)
     session.add(inst)
     session.flush()
-    return inst.instrument_id
+    return inst
 
 
 def _fetch_or_load(
@@ -122,54 +126,58 @@ def _fetch_or_load(
 ) -> pd.DataFrame:
     """Return a wide adj_close frame for ``tickers`` in ``[start, end]``.
 
-    Per ticker: look up the earliest and latest ts already stored in ``ohlcv``.
-    Any portion of [start, end] that falls outside that range is fetched from
-    the data source adaptor and inserted; everything else is read from the DB.
+    Per ticker we keep ``Instrument.fetched_start`` / ``fetched_end`` — the
+    window we have already asked the adaptor about. Anything inside that
+    window is served from the DB; only the portion of ``[start, end]`` that
+    extends past it is fetched from the adaptor. The recorded window grows
+    on every fetch (even one that returned no rows) so weekend / holiday
+    gaps don't trigger a refetch on the next tick.
     """
     if not tickers:
         return pd.DataFrame()
 
     session_factory = sessionmaker(bind=engine, future=True)
     with session_factory() as session:
-        ids = {s: _ensure_instrument(session, asset_class, market, s) for s in tickers}
+        instruments = {
+            s: _ensure_instrument(session, asset_class, market, s) for s in tickers
+        }
         session.commit()
 
-        stored_range: dict[int, tuple[date | None, date | None]] = {
-            iid: (None, None) for iid in ids.values()
-        }
-        for iid, dmin, dmax in session.execute(
-            select(OHLCV.instrument_id, func.min(OHLCV.ts), func.max(OHLCV.ts))
-            .where(OHLCV.instrument_id.in_(ids.values()))
-            .group_by(OHLCV.instrument_id)
-        ).all():
-            stored_range[iid] = (dmin, dmax)
-
         # Group tickers by the gap window they need so each window is one
-        # batched yfinance call (parallelized inside the adaptor).
+        # batched adaptor call (parallelized inside the adaptor).
         gap_to_tickers: dict[tuple[date, date], list[str]] = defaultdict(list)
         for symbol in tickers:
-            dmin, dmax = stored_range[ids[symbol]]
-            if dmax is None:
+            inst = instruments[symbol]
+            fs, fe = inst.fetched_start, inst.fetched_end
+            if fs is None or fe is None:
                 gap_to_tickers[(start, end)].append(symbol)
                 continue
-            if start < dmin:
-                gap_to_tickers[(start, dmin - timedelta(days=1))].append(symbol)
-            if end > dmax:
-                gap_to_tickers[(dmax + timedelta(days=1), end)].append(symbol)
+            if start < fs:
+                gap_to_tickers[(start, fs - timedelta(days=1))].append(symbol)
+            if end > fe:
+                gap_to_tickers[(fe + timedelta(days=1), end)].append(symbol)
 
         if gap_to_tickers:
             adaptor = YfAdaptor()
             for (gstart, gend), syms in gap_to_tickers.items():
                 fetched = adaptor.fetch_ohlcv_many(syms, gstart, gend)
                 for symbol in syms:
+                    inst = instruments[symbol]
+                    inst.fetched_start = (
+                        gstart if inst.fetched_start is None
+                        else min(inst.fetched_start, gstart)
+                    )
+                    inst.fetched_end = (
+                        gend if inst.fetched_end is None
+                        else max(inst.fetched_end, gend)
+                    )
                     df = fetched.get(symbol)
                     if df is None or df.empty:
                         continue
-                    iid = ids[symbol]
                     for ts, row in df.iterrows():
                         session.merge(
                             OHLCV(
-                                instrument_id=iid,
+                                instrument_id=inst.instrument_id,
                                 ts=ts.date() if hasattr(ts, "date") else ts,
                                 open=float(row["Open"]),
                                 high=float(row["High"]),
@@ -181,12 +189,13 @@ def _fetch_or_load(
                         )
             session.commit()
 
+        ids = [instruments[s].instrument_id for s in tickers]
         rows = session.execute(
             select(Instrument.symbol, OHLCV.ts, OHLCV.adj_close)
             .join(OHLCV, OHLCV.instrument_id == Instrument.instrument_id)
             .where(
                 and_(
-                    Instrument.instrument_id.in_(ids.values()),
+                    Instrument.instrument_id.in_(ids),
                     OHLCV.ts >= start,
                     OHLCV.ts <= end,
                 )
