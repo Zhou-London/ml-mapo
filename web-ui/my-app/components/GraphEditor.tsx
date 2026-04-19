@@ -14,12 +14,15 @@ import { LGraph, LGraphCanvas, LiteGraph } from "@comfyorg/litegraph";
 import type { GraphDoc, NodeSchema, RunResult } from "@/lib/types";
 import {
   NODE_ACTIVE_KEY,
+  NODE_ID_KEY,
   NODE_MS_KEY,
+  WIRE_COLORS,
   clearRunStatus,
   findMapoNode,
   loadIntoGraph,
   registerNodeTypes,
   saveFromGraph,
+  setEditorTheme,
   validateGraphParams,
 } from "@/lib/convert";
 
@@ -57,9 +60,12 @@ type NodeCategory = "data" | "forecast" | "risk" | "opt" | "general";
 
 const SIDEBAR_WIDTH_KEY = "mapo.sidebar.width";
 const THEME_KEY = "mapo.editor.theme";
+const PALETTE_OPEN_KEY = "mapo.palette.open";
+const INSPECTOR_OPEN_KEY = "mapo.inspector.open";
 const SIDEBAR_MIN = 220;
 const SIDEBAR_MAX = 520;
 const SIDEBAR_DEFAULT = 276;
+const INSPECTOR_WIDTH = 340;
 
 const CANVAS_THEME: Record<ThemeMode, CanvasThemePalette> = {
   dark: {
@@ -122,6 +128,11 @@ export default function GraphEditor() {
   const [hud, setHud] = useState({ nodes: 0, edges: 0 });
   const [running, setRunning] = useState(false);
   const [runResult, setRunResult] = useState<RunResult | null>(null);
+  const [paletteOpen, setPaletteOpen] = useState(true);
+  const [inspectorOpen, setInspectorOpen] = useState(true);
+  const [selectedNode, setSelectedNode] =
+    useState<import("@comfyorg/litegraph").LGraphNode | null>(null);
+  const [inspectorRev, setInspectorRev] = useState(0);
 
   const deferredQuery = useDeferredValue(paletteQuery);
   const canvasElRef = useRef<HTMLCanvasElement | null>(null);
@@ -143,7 +154,22 @@ export default function GraphEditor() {
     if (Number.isFinite(rawSidebarWidth)) {
       setSidebarWidth(clamp(rawSidebarWidth, SIDEBAR_MIN, SIDEBAR_MAX));
     }
+
+    const savedPalette = window.localStorage.getItem(PALETTE_OPEN_KEY);
+    if (savedPalette === "0") setPaletteOpen(false);
+    const savedInspector = window.localStorage.getItem(INSPECTOR_OPEN_KEY);
+    if (savedInspector === "0") setInspectorOpen(false);
   }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(PALETTE_OPEN_KEY, paletteOpen ? "1" : "0");
+  }, [paletteOpen]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(INSPECTOR_OPEN_KEY, inspectorOpen ? "1" : "0");
+  }, [inspectorOpen]);
 
   const refreshHud = useCallback((doc?: GraphDoc) => {
     if (doc) {
@@ -169,6 +195,7 @@ export default function GraphEditor() {
         throw new Error(body.detail || body.error || String(response.status));
       }
       const doc = (await response.json()) as GraphDoc;
+      setSelectedNode(null);
       loadIntoGraph(handles.graph, doc);
       applyGraphTheme(handles.graph, theme);
       handles.graph.start();
@@ -220,7 +247,10 @@ export default function GraphEditor() {
         setDirty(true);
         refreshHud();
       };
+      canvas.onNodeSelected = (node) => setSelectedNode(node);
+      canvas.onNodeDeselected = () => setSelectedNode(null);
       lgRef.current = { graph, canvas };
+      setEditorTheme(theme);
       applyCanvasTheme(canvas, theme);
       void fetchSchemas();
     } catch (error) {
@@ -231,6 +261,7 @@ export default function GraphEditor() {
   useEffect(() => {
     if (typeof window === "undefined") return;
     window.localStorage.setItem(THEME_KEY, theme);
+    setEditorTheme(theme);
     const handles = lgRef.current;
     if (!handles) return;
     applyCanvasTheme(handles.canvas, theme);
@@ -378,6 +409,24 @@ export default function GraphEditor() {
     }
   }, [hud.nodes, persistCurrentGraph, resetRunStatus, setNodeActive, setNodeDuration]);
 
+  const updateNodeParam = useCallback(
+    (paramName: string, nextValue: unknown) => {
+      const handles = lgRef.current;
+      if (!handles || !selectedNode) return;
+      const widget = selectedNode.widgets?.find((w) => w.name === paramName);
+      if (!widget) return;
+      (widget as { value: unknown }).value = nextValue;
+      handles.canvas.setDirty(true, true);
+      setDirty(true);
+      setInspectorRev((r) => r + 1);
+    },
+    [selectedNode],
+  );
+
+  const togglePalette = useCallback(() => setPaletteOpen((open) => !open), []);
+  const toggleInspector = useCallback(() => setInspectorOpen((open) => !open), []);
+  const closeRunResult = useCallback(() => setRunResult(null), []);
+
   const addNode = useCallback(
     (typeName: string) => {
       const handles = lgRef.current;
@@ -518,6 +567,15 @@ export default function GraphEditor() {
         return text.includes(query);
       });
 
+  const gridCols = [
+    paletteOpen ? "var(--sidebar-width)" : null,
+    paletteOpen ? "10px" : null,
+    "1fr",
+    inspectorOpen ? `${INSPECTOR_WIDTH}px` : null,
+  ]
+    .filter(Boolean)
+    .join(" ");
+
   return (
     <div className={`editor-root theme-${theme}`}>
       <header className="editor-topbar">
@@ -574,8 +632,12 @@ export default function GraphEditor() {
       <main
         ref={workspaceRef}
         className="editor-workspace"
-        style={{ ["--sidebar-width" as string]: `${sidebarWidth}px` }}
+        style={{
+          ["--sidebar-width" as string]: `${sidebarWidth}px`,
+          ["--grid-cols" as string]: gridCols,
+        }}
       >
+        {paletteOpen ? (
         <aside className="editor-palette" aria-label="Node palette">
           <header className="editor-panel-header">
             <h3>Nodes</h3>
@@ -583,6 +645,14 @@ export default function GraphEditor() {
               {paletteItems.length}
               {paletteItems.length !== allItems.length ? `/${allItems.length}` : ""}
             </span>
+            <button
+              className="editor-panel-collapse"
+              onClick={togglePalette}
+              title="Hide node palette"
+              aria-label="Hide node palette"
+            >
+              ◀
+            </button>
           </header>
           <div className="editor-palette-search">
             <input
@@ -625,7 +695,9 @@ export default function GraphEditor() {
             </span>
           </footer>
         </aside>
+        ) : null}
 
+        {paletteOpen ? (
         <div
           className="editor-resizer"
           role="separator"
@@ -635,22 +707,206 @@ export default function GraphEditor() {
           onDoubleClick={() => setSidebarWidth(SIDEBAR_DEFAULT)}
           title="Drag to resize the node palette"
         />
+        ) : null}
 
         <section className="editor-canvas-wrap">
           <canvas ref={canvasElRef} className="editor-canvas" tabIndex={0} />
+          {!paletteOpen ? (
+            <button
+              className="editor-edge-tab left"
+              onClick={togglePalette}
+              title="Show node palette"
+              aria-label="Show node palette"
+            >
+              Drop
+            </button>
+          ) : null}
+          {!inspectorOpen ? (
+            <button
+              className="editor-edge-tab right"
+              onClick={toggleInspector}
+              title="Show inspector"
+              aria-label="Show inspector"
+            >
+              Drop
+            </button>
+          ) : null}
           <div className="editor-canvas-meta" aria-hidden="true">
             unified graph · {hud.nodes} nodes · {hud.edges} edges
           </div>
           {runResult ? (
             <div className={`editor-console ${runResult.ok ? "ok" : "err"}`}>
               <div className="editor-console-title">
-                {runResult.ok ? "Last Run" : "Run Error"}
+                <span>{runResult.ok ? "Last Run" : "Run Error"}</span>
+                <button
+                  className="editor-console-close"
+                  onClick={closeRunResult}
+                  title="Close"
+                  aria-label="Close last-run output"
+                >
+                  ×
+                </button>
               </div>
               <pre>{formatRunResult(runResult)}</pre>
             </div>
           ) : null}
         </section>
+
+        {inspectorOpen ? (
+          <NodeInspector
+            node={selectedNode}
+            rev={inspectorRev}
+            onChangeParam={updateNodeParam}
+            onClose={toggleInspector}
+          />
+        ) : null}
       </main>
+    </div>
+  );
+}
+
+interface NodeInspectorProps {
+  node: import("@comfyorg/litegraph").LGraphNode | null;
+  rev: number;
+  onChangeParam: (paramName: string, nextValue: unknown) => void;
+  onClose: () => void;
+}
+
+function NodeInspector({ node, onChangeParam, onClose }: NodeInspectorProps) {
+  return (
+    <aside className="editor-inspector" aria-label="Node inspector">
+      <header className="editor-panel-header">
+        <h3>Inspector</h3>
+        {node ? (
+          <span className="count">{(node as { type?: string }).type ?? ""}</span>
+        ) : null}
+        <button
+          className="editor-panel-collapse"
+          onClick={onClose}
+          title="Hide inspector"
+          aria-label="Hide inspector"
+        >
+          ▶
+        </button>
+      </header>
+      {!node ? (
+        <p className="editor-inspector-empty">Select a node to see its details.</p>
+      ) : (
+        <div className="editor-inspector-body">
+          <section className="editor-inspector-section">
+            <h4>Identity</h4>
+            <div className="editor-inspector-row">
+              <label>id</label>
+              <span className="value">
+                {String(
+                  (node as unknown as Record<string, unknown>)[NODE_ID_KEY] ??
+                    node.id ??
+                    "",
+                )}
+              </span>
+            </div>
+            <div className="editor-inspector-row">
+              <label>type</label>
+              <span className="value">{(node as { type?: string }).type ?? ""}</span>
+            </div>
+          </section>
+
+          {node.widgets && node.widgets.length > 0 ? (
+            <section className="editor-inspector-section">
+              <h4>Config</h4>
+              {node.widgets.map((widget, i) => (
+                <ParamRow
+                  key={widget.name ?? `w-${i}`}
+                  widget={widget as unknown as ParamWidget}
+                  onChange={(v) => onChangeParam(widget.name ?? "", v)}
+                />
+              ))}
+            </section>
+          ) : null}
+
+          {node.inputs && node.inputs.length > 0 ? (
+            <section className="editor-inspector-section">
+              <h4>Inputs</h4>
+              <div className="editor-inspector-portlist">
+                {node.inputs.map((p, i) => (
+                  <span key={`in-${i}`} className="editor-inspector-port">
+                    {p.name}
+                    {p.type ? `: ${p.type}` : ""}
+                  </span>
+                ))}
+              </div>
+            </section>
+          ) : null}
+
+          {node.outputs && node.outputs.length > 0 ? (
+            <section className="editor-inspector-section">
+              <h4>Outputs</h4>
+              <div className="editor-inspector-portlist">
+                {node.outputs.map((p, i) => (
+                  <span key={`out-${i}`} className="editor-inspector-port">
+                    {p.name}
+                    {p.type ? `: ${p.type}` : ""}
+                  </span>
+                ))}
+              </div>
+            </section>
+          ) : null}
+        </div>
+      )}
+    </aside>
+  );
+}
+
+interface ParamWidget {
+  name?: string;
+  type?: string;
+  value?: unknown;
+}
+
+function ParamRow({
+  widget,
+  onChange,
+}: {
+  widget: ParamWidget;
+  onChange: (next: unknown) => void;
+}) {
+  const value = widget.value;
+  const type = widget.type;
+  if (type === "toggle") {
+    return (
+      <div className="editor-inspector-row">
+        <label>{widget.name}</label>
+        <input
+          className="editor-inspector-checkbox"
+          type="checkbox"
+          checked={Boolean(value)}
+          onChange={(e) => onChange(e.target.checked)}
+        />
+      </div>
+    );
+  }
+  if (type === "number") {
+    return (
+      <div className="editor-inspector-row">
+        <label>{widget.name}</label>
+        <input
+          className="editor-inspector-input"
+          type="number"
+          value={Number(value ?? 0)}
+          onChange={(e) => onChange(Number(e.target.value))}
+        />
+      </div>
+    );
+  }
+  return (
+    <div className="editor-inspector-row">
+      <label>{widget.name}</label>
+      <input
+        className="editor-inspector-input"
+        type="text"
+        value={value == null ? "" : String(value)}
+        onChange={(e) => onChange(e.target.value)}
+      />
     </div>
   );
 }
@@ -755,7 +1011,8 @@ function applyGraphTheme(
       : (Object.values(links as unknown as Record<string, unknown>) as Iterable<unknown>);
   for (const rawLink of values) {
     if (!rawLink || typeof rawLink !== "object") continue;
-    (rawLink as { color?: string }).color = palette.link;
+    const link = rawLink as { type?: string; color?: string };
+    link.color = (link.type && WIRE_COLORS[link.type]) || palette.link;
   }
 }
 
@@ -832,42 +1089,11 @@ function applyCanvasTheme(
     output_off: palette.outputOff,
     output_on: palette.outputOn,
   };
-  canvas.default_connection_color_byType = {
-    ohlcv_snapshot: palette.link,
-    covariance: palette.link,
-    alpha_series: palette.link,
-    alpha_scores: palette.link,
-    weights: palette.link,
-    dict: palette.link,
-    date: palette.link,
-    Engine: palette.link,
-    int: palette.link,
-    str: palette.link,
-  };
-  canvas.default_connection_color_byTypeOff = {
-    ohlcv_snapshot: palette.link,
-    covariance: palette.link,
-    alpha_series: palette.link,
-    alpha_scores: palette.link,
-    weights: palette.link,
-    dict: palette.link,
-    date: palette.link,
-    Engine: palette.link,
-    int: palette.link,
-    str: palette.link,
-  };
+  canvas.default_connection_color_byType = { ...WIRE_COLORS };
+  canvas.default_connection_color_byTypeOff = { ...WIRE_COLORS };
   LGraphCanvas.link_type_colors = {
     ...LGraphCanvas.link_type_colors,
-    ohlcv_snapshot: palette.link,
-    covariance: palette.link,
-    alpha_series: palette.link,
-    alpha_scores: palette.link,
-    weights: palette.link,
-    dict: palette.link,
-    date: palette.link,
-    Engine: palette.link,
-    int: palette.link,
-    str: palette.link,
+    ...WIRE_COLORS,
   };
   canvas.onDrawBackground = createBackgroundRenderer(canvas, palette);
 

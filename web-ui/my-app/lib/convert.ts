@@ -41,6 +41,27 @@ export function clearRunStatus(graph: LGraph): void {
   }
 }
 
+// One distinct color per wire type. The same color is used for the wire and
+// the input/output dots on either end (LiteGraph reads it via
+// `link_type_colors` and `default_connection_color_byType`).
+export const WIRE_COLORS: Record<string, string> = {
+  date: "#ffa860",
+  Engine: "#a0aabe",
+  frame: "#5fc7b8",
+  cov: "#ed6f9a",
+  alpha: "#7ad17a",
+  weights: "#b18ef0",
+};
+
+// Module-level theme so MapoNode draw callbacks can pick colors that read
+// well on the current canvas background. Editor calls setEditorTheme() on
+// every theme change.
+type EditorTheme = "dark" | "light";
+let currentTheme: EditorTheme = "dark";
+export function setEditorTheme(theme: EditorTheme): void {
+  currentTheme = theme;
+}
+
 // UI-only hints: example value shown in the field as a placeholder, and an
 // optional regex used to flag obviously-wrong input. Keyed by param name so
 // it works across every node type that exposes the same param.
@@ -179,7 +200,8 @@ function buildNodeClass(schema: NodeSchema): typeof LGraphNode {
       if (typeof ms === "number") {
         ctx.save();
         ctx.font = "11px ui-monospace, SFMono-Regular, monospace";
-        ctx.fillStyle = self[NODE_ACTIVE_KEY] ? "#ffd34d" : "#a5b4c0";
+        const msColor = currentTheme === "light" ? "#5c6b7a" : "#a5b4c0";
+        ctx.fillStyle = self[NODE_ACTIVE_KEY] ? "#c08e00" : msColor;
         ctx.textAlign = "right";
         ctx.textBaseline = "bottom";
         ctx.fillText(formatMs(ms), w - 8, h - 6);
@@ -190,6 +212,8 @@ function buildNodeClass(schema: NodeSchema): typeof LGraphNode {
     onDrawAfterWidgets(ctx: CanvasRenderingContext2D): void {
       const w = (this.size?.[0] ?? 0) as number;
       const widgetH = LiteGraph.NODE_WIDGET_HEIGHT ?? 20;
+      const emptyColor = currentTheme === "light" ? "#5c6b7a" : "#9aa8b6";
+      const wrongColor = currentTheme === "light" ? "#c7544d" : "#ff7a7a";
       for (const widget of this.widgets ?? []) {
         const hint = PARAM_HINTS[widget.name ?? ""];
         if (!hint) continue;
@@ -203,14 +227,12 @@ function buildNodeClass(schema: NodeSchema): typeof LGraphNode {
         ctx.textAlign = "right";
         ctx.textBaseline = "middle";
         if (status === "empty") {
-          // Show the example in-place — the value area is empty so nothing collides.
           ctx.font = "italic 11px ui-sans-serif, system-ui, sans-serif";
-          ctx.fillStyle = "#9aa8b6";
+          ctx.fillStyle = emptyColor;
           ctx.fillText(`e.g. ${hint.example}`, w - 14, y + widgetH / 2);
         } else {
-          // Just a marker — drawing the long hint here would overlap the typed value.
           ctx.font = "bold 13px ui-sans-serif, system-ui, sans-serif";
-          ctx.fillStyle = "#ff7a7a";
+          ctx.fillStyle = wrongColor;
           ctx.fillText("✗", w - 10, y + widgetH / 2);
         }
         ctx.restore();
