@@ -12,7 +12,16 @@ import "@comfyorg/litegraph/style.css";
 import { LGraph, LGraphCanvas, LiteGraph } from "@comfyorg/litegraph";
 
 import type { GraphDoc, NodeSchema, RunResult } from "@/lib/types";
-import { loadIntoGraph, registerNodeTypes, saveFromGraph } from "@/lib/convert";
+import {
+  NODE_ACTIVE_KEY,
+  NODE_MS_KEY,
+  clearRunStatus,
+  findMapoNode,
+  loadIntoGraph,
+  registerNodeTypes,
+  saveFromGraph,
+  validateGraphParams,
+} from "@/lib/convert";
 
 type Status =
   | { kind: "idle" | "ok" | "err" | "warn" | "loading"; text: string }
@@ -273,33 +282,84 @@ export default function GraphEditor() {
     await loadPersistedGraph();
   }, [dirty, loadPersistedGraph]);
 
+  const setNodeActive = useCallback((id: string, active: boolean) => {
+    const handles = lgRef.current;
+    if (!handles) return;
+    const node = findMapoNode(handles.graph, id) as
+      | (import("@comfyorg/litegraph").LGraphNode & Record<string, unknown>)
+      | undefined;
+    if (!node) return;
+    node[NODE_ACTIVE_KEY] = active;
+    handles.canvas.setDirty(true, true);
+  }, []);
+
+  const setNodeDuration = useCallback((id: string, ms: number) => {
+    const handles = lgRef.current;
+    if (!handles) return;
+    const node = findMapoNode(handles.graph, id) as
+      | (import("@comfyorg/litegraph").LGraphNode & Record<string, unknown>)
+      | undefined;
+    if (!node) return;
+    node[NODE_MS_KEY] = ms;
+    node[NODE_ACTIVE_KEY] = false;
+    handles.canvas.setDirty(true, true);
+  }, []);
+
+  const resetRunStatus = useCallback(() => {
+    const handles = lgRef.current;
+    if (!handles) return;
+    clearRunStatus(handles.graph);
+    handles.canvas.setDirty(true, true);
+  }, []);
+
   const run = useCallback(async () => {
     setRunning(true);
     setRunResult(null);
+    resetRunStatus();
     setStatus({ kind: "loading", text: "saving and running…" });
     try {
+      const handles = lgRef.current;
+      if (handles) {
+        const errs = validateGraphParams(handles.graph);
+        if (errs.length) {
+          const e = errs[0];
+          const example = e.example ? ` · example: ${e.example}` : "";
+          throw new Error(
+            `${e.node}.${e.param} invalid value ${JSON.stringify(e.value)}${example}` +
+              (errs.length > 1 ? ` (+${errs.length - 1} more)` : ""),
+          );
+        }
+      }
       await persistCurrentGraph();
       const response = await fetch("/api/graph/run", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ ticks: 1 }),
       });
-      const body = (await response.json().catch(() => ({}))) as Partial<RunResult> & {
-        error?: string;
-        detail?: string;
-      };
-      if (!response.ok) {
-        const failure: RunResult = {
-          ok: false,
-          code: Number(body.code ?? -1),
-          stdout: String(body.stdout ?? ""),
-          stderr: String(body.stderr ?? body.detail ?? body.error ?? ""),
-        };
-        setRunResult(failure);
-        throw new Error(firstLine(failure.stderr || failure.stdout || "run failed"));
+      if (!response.ok || !response.body) {
+        const text = await response.text().catch(() => "");
+        throw new Error(firstLine(text || `HTTP ${response.status}`));
       }
-      const result = body as RunResult;
+
+      let finalResult: RunResult | null = null;
+      await consumeSseStream(response.body, (event, data) => {
+        if (event === "node_start" && typeof data?.id === "string") {
+          setNodeActive(data.id, true);
+        } else if (event === "node_end" && typeof data?.id === "string") {
+          setNodeDuration(data.id, Number(data.ms ?? 0));
+        } else if (event === "done") {
+          finalResult = data as unknown as RunResult;
+        } else if (event === "error") {
+          throw new Error(String(data?.detail ?? "run failed"));
+        }
+      });
+
+      const result = finalResult as RunResult | null;
+      if (!result) throw new Error("run ended without a final event");
       setRunResult(result);
+      if (!result.ok) {
+        throw new Error(firstLine(result.stderr || result.stdout || `exit ${result.code}`));
+      }
       setStatus({
         kind: "ok",
         text: `run completed · ${hud.nodes} nodes validated and executed`,
@@ -308,8 +368,15 @@ export default function GraphEditor() {
       setStatus({ kind: "err", text: `run failed: ${errorMessage(error)}` });
     } finally {
       setRunning(false);
+      const handles = lgRef.current;
+      if (handles) {
+        for (const raw of handles.graph._nodes ?? []) {
+          (raw as unknown as Record<string, unknown>)[NODE_ACTIVE_KEY] = false;
+        }
+        handles.canvas.setDirty(true, true);
+      }
     }
-  }, [hud.nodes, persistCurrentGraph]);
+  }, [hud.nodes, persistCurrentGraph, resetRunStatus, setNodeActive, setNodeDuration]);
 
   const addNode = useCallback(
     (typeName: string) => {
@@ -712,6 +779,44 @@ function categoryFromType(type: string): NodeCategory {
 function errorMessage(error: unknown): string {
   if (error instanceof Error) return error.message;
   return String(error);
+}
+
+async function consumeSseStream(
+  body: ReadableStream<Uint8Array>,
+  onEvent: (event: string, data: Record<string, unknown> | null) => void,
+): Promise<void> {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let sep: number;
+      while ((sep = buffer.indexOf("\n\n")) !== -1) {
+        const block = buffer.slice(0, sep);
+        buffer = buffer.slice(sep + 2);
+        let event = "message";
+        let data = "";
+        for (const line of block.split("\n")) {
+          if (line.startsWith("event:")) event = line.slice(6).trim();
+          else if (line.startsWith("data:")) data += line.slice(5).trim();
+        }
+        if (!data) continue;
+        let parsed: Record<string, unknown> | null = null;
+        try {
+          parsed = JSON.parse(data);
+        } catch {
+          parsed = null;
+        }
+        onEvent(event, parsed);
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
 }
 
 function applyCanvasTheme(

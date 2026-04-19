@@ -22,6 +22,7 @@ port names at load/save time.
 from __future__ import annotations
 
 import json
+import time
 from collections import defaultdict
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -168,6 +169,9 @@ class Executor:
         self._inputs_for: dict[str, list[Edge]] = defaultdict(list)
         for e in graph.edges:
             self._inputs_for[e.dst_node].append(e)
+        # Optional per-node lifecycle hook; main.py wires this to a stdout printer
+        # so the editor's SSE stream can highlight the active node + show timings.
+        self.on_event: Callable[[dict[str, Any]], None] | None = None
 
     def _topo_sort(self) -> list[str]:
         return topo_sort(self.graph)
@@ -192,7 +196,15 @@ class Executor:
                         f" for {nid}.{e.dst_port}"
                     )
                 kwargs[e.dst_port] = src_out[e.src_port]
-            result = node.process(**kwargs) or {}
+            if self.on_event is not None:
+                self.on_event({"event": "node_start", "id": nid})
+            t0 = time.perf_counter()
+            try:
+                result = node.process(**kwargs) or {}
+            finally:
+                ms = (time.perf_counter() - t0) * 1000.0
+                if self.on_event is not None:
+                    self.on_event({"event": "node_end", "id": nid, "ms": ms})
             outputs[nid] = result
         return outputs
 

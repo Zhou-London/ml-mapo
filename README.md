@@ -85,7 +85,7 @@ Those files are now node catalogs, not standalone pipeline runners.
 
 | Type                  | Inputs                      | Output          | Notes |
 | --------------------- | --------------------------- | --------------- | ----- |
-| `data/DateRange`      | —                           | `start`, `end`  | Blank date params fall back to `[today − lookback_days, today]`. |
+| `data/DateRange`      | —                           | `start`, `end`  | Blank date params fall back to a 365-day window ending today. |
 | `data/Database`       | —                           | `engine`        | Owns the SQLAlchemy engine and the `ohlcv` hypertable. |
 | `data/USEquity`       | `engine`, `start`, `end`    | `frame`         | US equities (yfinance). |
 | `data/UKEquity`       | `engine`, `start`, `end`    | `frame`         | LSE equities (yfinance, `.L` suffix). |

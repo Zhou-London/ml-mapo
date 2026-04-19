@@ -15,6 +15,7 @@ output is a wide ``adj_close`` frame (index = date, columns = tickers).
 from __future__ import annotations
 
 import sys
+from collections import defaultdict
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -121,8 +122,9 @@ def _fetch_or_load(
 ) -> pd.DataFrame:
     """Return a wide adj_close frame for ``tickers`` in ``[start, end]``.
 
-    Missing bars are fetched from yfinance and upserted into the DB so that
-    subsequent ticks for the same window hit the cache.
+    Per ticker: look up the earliest and latest ts already stored in ``ohlcv``.
+    Any portion of [start, end] that falls outside that range is fetched from
+    the data source adaptor and inserted; everything else is read from the DB.
     """
     if not tickers:
         return pd.DataFrame()
@@ -132,40 +134,51 @@ def _fetch_or_load(
         ids = {s: _ensure_instrument(session, asset_class, market, s) for s in tickers}
         session.commit()
 
-        last_ts = dict(
-            session.execute(
-                select(OHLCV.instrument_id, func.max(OHLCV.ts))
-                .where(
-                    and_(
-                        OHLCV.instrument_id.in_(ids.values()),
-                        OHLCV.ts <= end,
-                    )
-                )
-                .group_by(OHLCV.instrument_id)
-            ).all()
-        )
+        stored_range: dict[int, tuple[date | None, date | None]] = {
+            iid: (None, None) for iid in ids.values()
+        }
+        for iid, dmin, dmax in session.execute(
+            select(OHLCV.instrument_id, func.min(OHLCV.ts), func.max(OHLCV.ts))
+            .where(OHLCV.instrument_id.in_(ids.values()))
+            .group_by(OHLCV.instrument_id)
+        ).all():
+            stored_range[iid] = (dmin, dmax)
 
-        to_fetch = [s for s in tickers if (last_ts.get(ids[s]) or date.min) < end]
-        if to_fetch:
-            fetched = YfAdaptor().fetch_ohlcv_many(to_fetch, start, end)
-            for symbol in to_fetch:
-                df = fetched.get(symbol)
-                if df is None or df.empty:
-                    continue
-                iid = ids[symbol]
-                for ts, row in df.iterrows():
-                    session.merge(
-                        OHLCV(
-                            instrument_id=iid,
-                            ts=ts.date() if hasattr(ts, "date") else ts,
-                            open=float(row["Open"]),
-                            high=float(row["High"]),
-                            low=float(row["Low"]),
-                            close=float(row["Close"]),
-                            adj_close=float(row["Adj Close"]),
-                            volume=int(row["Volume"]),
+        # Group tickers by the gap window they need so each window is one
+        # batched yfinance call (parallelized inside the adaptor).
+        gap_to_tickers: dict[tuple[date, date], list[str]] = defaultdict(list)
+        for symbol in tickers:
+            dmin, dmax = stored_range[ids[symbol]]
+            if dmax is None:
+                gap_to_tickers[(start, end)].append(symbol)
+                continue
+            if start < dmin:
+                gap_to_tickers[(start, dmin - timedelta(days=1))].append(symbol)
+            if end > dmax:
+                gap_to_tickers[(dmax + timedelta(days=1), end)].append(symbol)
+
+        if gap_to_tickers:
+            adaptor = YfAdaptor()
+            for (gstart, gend), syms in gap_to_tickers.items():
+                fetched = adaptor.fetch_ohlcv_many(syms, gstart, gend)
+                for symbol in syms:
+                    df = fetched.get(symbol)
+                    if df is None or df.empty:
+                        continue
+                    iid = ids[symbol]
+                    for ts, row in df.iterrows():
+                        session.merge(
+                            OHLCV(
+                                instrument_id=iid,
+                                ts=ts.date() if hasattr(ts, "date") else ts,
+                                open=float(row["Open"]),
+                                high=float(row["High"]),
+                                low=float(row["Low"]),
+                                close=float(row["Close"]),
+                                adj_close=float(row["Adj Close"]),
+                                volume=int(row["Volume"]),
+                            )
                         )
-                    )
             session.commit()
 
         rows = session.execute(
@@ -197,19 +210,17 @@ class DateRangeNode(Node):
     CATEGORY = "data"
     OUTPUTS = {"start": "date", "end": "date"}
     PARAMS = {
-        "start_date": ("str", ""),  # ISO; blank → end - lookback_days
+        "start_date": ("str", ""),  # ISO; blank → today - 365 days
         "end_date": ("str", ""),    # ISO; blank → today
-        "lookback_days": ("int", 365),
     }
 
     def process(self) -> dict:
         end_str = str(self.params["end_date"]).strip()
         start_str = str(self.params["start_date"]).strip()
         end = date.fromisoformat(end_str) if end_str else date.today()
-        if start_str:
-            start = date.fromisoformat(start_str)
-        else:
-            start = end - timedelta(days=int(self.params["lookback_days"]))
+        start = (
+            date.fromisoformat(start_str) if start_str else end - timedelta(days=365)
+        )
         return {"start": start, "end": end}
 
 

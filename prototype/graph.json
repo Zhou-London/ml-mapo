@@ -1,28 +1,92 @@
 {
   "nodes": [
     {
-      "id": "cov",
-      "type": "risk/Covariance",
+      "id": "display",
+      "type": "opt/WeightsDisplay",
       "params": {
-        "factor": "naive_sample_cov",
-        "lookback": 252,
-        "trading_days": 252
+        "top": 10
       },
       "pos": [
-        880,
-        170
+        1440,
+        270
+      ],
+      "size": [
+        210,
+        60
       ]
     },
     {
-      "id": "mvo",
-      "type": "opt/Optimizer",
+      "id": "agg",
+      "type": "data/Aggregate",
+      "params": {},
+      "pos": [
+        682,
+        272
+      ],
+      "size": [
+        140,
+        60
+      ]
+    },
+    {
+      "id": "db",
+      "type": "data/Database",
       "params": {
-        "risk_aversion": 50,
-        "long_only": true
+        "url": "postgresql+psycopg2://postgres:password@localhost:6543/postgres"
       },
       "pos": [
-        1160,
-        270
+        -11,
+        305
+      ],
+      "size": [
+        210,
+        87
+      ]
+    },
+    {
+      "id": "us",
+      "type": "data/USEquity",
+      "params": {
+        "tickers": "NVDA,AAPL,MSFT,AMZN,GOOGL,META,TSLA,AVGO,COST,NFLX"
+      },
+      "pos": [
+        404,
+        172
+      ],
+      "size": [
+        210,
+        127
+      ]
+    },
+    {
+      "id": "date",
+      "type": "data/DateRange",
+      "params": {
+        "start_date": "2025-01-01",
+        "end_date": "2026-04-19"
+      },
+      "pos": [
+        -1,
+        97
+      ],
+      "size": [
+        210,
+        127
+      ]
+    },
+    {
+      "id": "uk",
+      "type": "data/UKEquity",
+      "params": {
+        "tickers": "HSBA.L,BP.L,SHEL.L,AZN.L,ULVR.L"
+      },
+      "pos": [
+        397,
+        384
+      ],
+      "size": [
+        210,
+        133
       ]
     },
     {
@@ -35,72 +99,43 @@
       "pos": [
         880,
         380
+      ],
+      "size": [
+        210,
+        125
       ]
     },
     {
-      "id": "db",
-      "type": "data/Database",
+      "id": "cov",
+      "type": "risk/Covariance",
       "params": {
-        "url": "postgresql+psycopg2://postgres:password@localhost:6543/postgres"
+        "factor": "naive_sample_cov",
+        "lookback": 252,
+        "trading_days": 252
       },
       "pos": [
-        -11,
-        305
+        880,
+        170
+      ],
+      "size": [
+        210,
+        127
       ]
     },
     {
-      "id": "display",
-      "type": "opt/WeightsDisplay",
+      "id": "mvo",
+      "type": "opt/Optimizer",
       "params": {
-        "top": 10
+        "risk_aversion": 50,
+        "long_only": true
       },
       "pos": [
-        1440,
+        1160,
         270
-      ]
-    },
-    {
-      "id": "agg",
-      "type": "data/Aggregate",
-      "params": {},
-      "pos": [
-        682,
-        272
-      ]
-    },
-    {
-      "id": "uk",
-      "type": "data/UKEquity",
-      "params": {
-        "tickers": "HSBA.L,BP.L,SHEL.L,AZN.L,ULVR.L"
-      },
-      "pos": [
-        397,
-        384
-      ]
-    },
-    {
-      "id": "us",
-      "type": "data/USEquity",
-      "params": {
-        "tickers": "NVDA,AAPL,MSFT,AMZN,GOOGL,META,TSLA,AVGO,COST,NFLX"
-      },
-      "pos": [
-        404,
-        172
-      ]
-    },
-    {
-      "id": "date",
-      "type": "data/DateRange",
-      "params": {
-        "start_date": "",
-        "end_date": "",
-        "lookback_days": 365
-      },
-      "pos": [
-        -1,
-        97
+      ],
+      "size": [
+        210,
+        151
       ]
     }
   ],

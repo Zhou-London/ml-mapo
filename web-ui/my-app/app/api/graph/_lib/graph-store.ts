@@ -120,6 +120,7 @@ function normalizeGraph(payload: unknown): GraphDoc {
         type: node.type,
         params: { ...(node.params ?? {}) },
         pos: [Number(node.pos?.[0] ?? 0), Number(node.pos?.[1] ?? 0)],
+        size: [Number(node.size?.[0] ?? 0), Number(node.size?.[1] ?? 0)],
       };
     }),
     edges: doc.edges.map((edge) => {

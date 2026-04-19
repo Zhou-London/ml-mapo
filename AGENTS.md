@@ -82,7 +82,7 @@ Default factor implementations:
 
 ### Data-node layout
 
-- `data/DateRange` — emits `(start, end)`. Blank dates fall back to `end = today`, `start = end − lookback_days`.
+- `data/DateRange` — emits `(start, end)`. Blank dates fall back to a 365-day window ending today.
 - `data/Database` — owns the SQLAlchemy engine, schema, and hypertable. Outputs an `Engine` handle.
 - `data/USEquity` / `data/UKEquity` / `data/FX` — one node per asset class, each with a `tickers` CSV param. Given `engine + start + end`, they upsert any missing bars from yfinance and emit a wide `adj_close` `frame` (index = date, columns = tickers).
 - `data/Aggregate` — concatenates two `frame`s column-wise. Chain multiple Aggregates for ≥ 3 asset classes.

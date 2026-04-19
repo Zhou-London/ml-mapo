@@ -23,6 +23,7 @@ export interface GraphNode {
   type: string;
   params?: Record<string, unknown>;
   pos?: [number, number];
+  size?: [number, number];
 }
 
 export interface GraphEdge {
