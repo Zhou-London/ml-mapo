@@ -94,21 +94,6 @@
       ]
     },
     {
-      "id": "weightsdisplay",
-      "type": "opt/WeightsDisplay",
-      "params": {
-        "top": 0
-      },
-      "pos": [
-        1417,
-        251
-      ],
-      "size": [
-        210,
-        60
-      ]
-    },
-    {
       "id": "uk",
       "type": "data/UKEquity",
       "params": {
@@ -137,6 +122,22 @@
         210,
         127
       ]
+    },
+    {
+      "id": "weightsdisplay",
+      "type": "opt/WeightsDisplay",
+      "params": {
+        "top": 0
+      },
+      "pos": [
+        1473,
+        304
+      ],
+      "size": [
+        210,
+        70
+      ],
+      "disabled": true
     }
   ],
   "edges": [
@@ -211,12 +212,6 @@
       "src_port": "alpha",
       "dst_node": "mvo",
       "dst_port": "alpha"
-    },
-    {
-      "src_node": "mvo",
-      "src_port": "weights",
-      "dst_node": "weightsdisplay",
-      "dst_port": "weights"
     }
   ]
 }

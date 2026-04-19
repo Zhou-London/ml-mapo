@@ -54,6 +54,8 @@ interface CanvasThemePalette {
   nodeSurfaceLight: string;
   nodeOutline: string;
   widgetBg: string;
+  widgetText: string;
+  widgetSecondaryText: string;
   nodeCategory: Record<NodeCategory, { color: string; bgcolor: string; boxcolor: string }>;
 }
 
@@ -88,6 +90,8 @@ const CANVAS_THEME: Record<ThemeMode, CanvasThemePalette> = {
     nodeSurfaceLight: "#313d49",
     nodeOutline: "#5b6a7a",
     widgetBg: "#161d24",
+    widgetText: "#dde4ec",
+    widgetSecondaryText: "#8a96a6",
     nodeCategory: {
       data: { color: "#314b6a", bgcolor: "#3e618b", boxcolor: "#75a8e4" },
       forecast: { color: "#35563a", bgcolor: "#45724d", boxcolor: "#88d497" },
@@ -112,6 +116,8 @@ const CANVAS_THEME: Record<ThemeMode, CanvasThemePalette> = {
     nodeSurfaceLight: "#e8eef5",
     nodeOutline: "#9db0c5",
     widgetBg: "#dfe8f1",
+    widgetText: "#1a2330",
+    widgetSecondaryText: "#5c6b7a",
     nodeCategory: {
       data: { color: "#8fb7f1", bgcolor: "#d7e6fb", boxcolor: "#4475bb" },
       forecast: { color: "#abddb0", bgcolor: "#dff3e2", boxcolor: "#4d8e58" },
@@ -1180,6 +1186,8 @@ function applyCanvasTheme(
   LiteGraph.NODE_DEFAULT_BOXCOLOR = palette.nodeOutline;
   LiteGraph.NODE_BOX_OUTLINE_COLOR = palette.nodeOutline;
   LiteGraph.WIDGET_BGCOLOR = palette.widgetBg;
+  LiteGraph.WIDGET_TEXT_COLOR = palette.widgetText;
+  LiteGraph.WIDGET_SECONDARY_TEXT_COLOR = palette.widgetSecondaryText;
 }
 
 function createBackgroundRenderer(
