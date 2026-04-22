@@ -7,9 +7,10 @@ Layout:
     Database ───┤               ├─► Aggregate ──► (frame) downstream
                 └─► UKEquity ──┘
 
-The ``Database`` node exposes a ``DataStore`` handle that encapsulates every
-DB + adaptor interaction. Asset-class nodes call ``store.load_frame(...)``
-and nothing else — they carry no SQLAlchemy or yfinance knowledge.
+``Database`` exposes a ``DataStore`` handle — DB persistence only.
+Each asset-class node picks its own adaptor and implements ``fetch(...)``,
+i.e. how to use that adaptor. The store resolves gaps by calling the
+asset node's fetch callback.
 """
 
 from __future__ import annotations
@@ -22,7 +23,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import pandas as pd
-from adaptors import YfAdaptor
+from adaptors import DataSourceAdaptor, YfAdaptor
 from graph import Node, register_node
 from sqlalchemy import (
     BigInteger,
@@ -96,15 +97,21 @@ def _split_csv(value: str) -> list[str]:
 
 
 class DataStore:
-    """Encapsulates every DB + adaptor interaction.
+    """DB persistence helpers for asset-class nodes.
 
-    Asset-class nodes only call ``load_frame(...)``. The store owns the
-    engine, the ORM tables, schema lifecycle, and the data-source adaptor.
+    Two public primitives:
+
+    - ``fetch_gaps(asset_class, market, tickers, start, end, adaptor)``
+      ensures the DB covers ``[start, end]`` using the supplied adaptor.
+    - ``read_frame(asset_class, market, tickers, start, end)`` returns a
+      wide ``adj_close`` frame from the DB.
+
+    Asset nodes glue these together in their own ``process`` — they pick
+    whichever adaptor they want.
     """
 
-    def __init__(self, engine: Engine, adaptor: YfAdaptor | None = None) -> None:
+    def __init__(self, engine: Engine) -> None:
         self.engine = engine
-        self.adaptor = adaptor or YfAdaptor()
         self._Session = sessionmaker(bind=engine, future=True)
 
     def initialize(self) -> None:
@@ -119,7 +126,64 @@ class DataStore:
                 )
             )
 
-    def load_frame(
+    def fetch_gaps(
+        self,
+        asset_class: str,
+        market: str,
+        tickers: list[str],
+        start: date,
+        end: date,
+        adaptor: DataSourceAdaptor,
+    ) -> None:
+        """Ask ``adaptor`` for any bars in ``[start, end]`` we don't have yet."""
+        if not tickers:
+            return
+        with self._Session() as session:
+            instruments = self._ensure_instruments(session, asset_class, market, tickers)
+            session.commit()
+            gaps: dict[tuple[date, date], list[str]] = defaultdict(list)
+            for symbol, inst in instruments.items():
+                fs, fe = inst.fetched_start, inst.fetched_end
+                if fs is None or fe is None:
+                    gaps[(start, end)].append(symbol)
+                    continue
+                if start < fs:
+                    gaps[(start, fs - timedelta(days=1))].append(symbol)
+                if end > fe:
+                    gaps[(fe + timedelta(days=1), end)].append(symbol)
+            if not gaps:
+                return
+            for (gstart, gend), syms in gaps.items():
+                fetched = adaptor.fetch_ohlcv_many(syms, gstart, gend)
+                for symbol in syms:
+                    inst = instruments[symbol]
+                    inst.fetched_start = (
+                        gstart if inst.fetched_start is None
+                        else min(inst.fetched_start, gstart)
+                    )
+                    inst.fetched_end = (
+                        gend if inst.fetched_end is None
+                        else max(inst.fetched_end, gend)
+                    )
+                    df = fetched.get(symbol)
+                    if df is None or df.empty:
+                        continue
+                    for ts, row in df.iterrows():
+                        session.merge(
+                            OHLCV(
+                                instrument_id=inst.instrument_id,
+                                ts=ts.date() if hasattr(ts, "date") else ts,
+                                open=float(row["Open"]),
+                                high=float(row["High"]),
+                                low=float(row["Low"]),
+                                close=float(row["Close"]),
+                                adj_close=float(row["Adj Close"]),
+                                volume=int(row["Volume"]),
+                            )
+                        )
+            session.commit()
+
+    def read_frame(
         self,
         asset_class: str,
         market: str,
@@ -127,114 +191,52 @@ class DataStore:
         start: date,
         end: date,
     ) -> pd.DataFrame:
-        """Return a wide ``adj_close`` frame for ``tickers`` in ``[start, end]``."""
+        """Wide ``adj_close`` frame for ``tickers`` from the DB."""
         if not tickers:
             return pd.DataFrame()
         with self._Session() as session:
-            instruments = {
-                s: self._ensure_instrument(session, asset_class, market, s)
-                for s in tickers
-            }
+            instruments = self._ensure_instruments(session, asset_class, market, tickers)
             session.commit()
-            self._fetch_gaps(session, instruments, start, end)
-            return self._read_frame(session, instruments, start, end)
-
-    # ---------- internals ----------
-
-    def _ensure_instrument(
-        self, session: Session, asset_class: str, market: str, symbol: str
-    ) -> Instrument:
-        existing = session.execute(
-            select(Instrument).where(
-                and_(
-                    Instrument.asset_class == asset_class,
-                    Instrument.market == market,
-                    Instrument.symbol == symbol,
-                )
-            )
-        ).scalar_one_or_none()
-        if existing is not None:
-            return existing
-        inst = Instrument(asset_class=asset_class, market=market, symbol=symbol)
-        session.add(inst)
-        session.flush()
-        return inst
-
-    def _fetch_gaps(
-        self,
-        session: Session,
-        instruments: dict[str, Instrument],
-        start: date,
-        end: date,
-    ) -> None:
-        # Group tickers by the gap window they need so each window is one
-        # batched adaptor call (parallelized inside the adaptor).
-        gap_to_tickers: dict[tuple[date, date], list[str]] = defaultdict(list)
-        for symbol, inst in instruments.items():
-            fs, fe = inst.fetched_start, inst.fetched_end
-            if fs is None or fe is None:
-                gap_to_tickers[(start, end)].append(symbol)
-                continue
-            if start < fs:
-                gap_to_tickers[(start, fs - timedelta(days=1))].append(symbol)
-            if end > fe:
-                gap_to_tickers[(fe + timedelta(days=1), end)].append(symbol)
-        if not gap_to_tickers:
-            return
-        for (gstart, gend), syms in gap_to_tickers.items():
-            fetched = self.adaptor.fetch_ohlcv_many(syms, gstart, gend)
-            for symbol in syms:
-                inst = instruments[symbol]
-                inst.fetched_start = (
-                    gstart if inst.fetched_start is None
-                    else min(inst.fetched_start, gstart)
-                )
-                inst.fetched_end = (
-                    gend if inst.fetched_end is None
-                    else max(inst.fetched_end, gend)
-                )
-                df = fetched.get(symbol)
-                if df is None or df.empty:
-                    continue
-                for ts, row in df.iterrows():
-                    session.merge(
-                        OHLCV(
-                            instrument_id=inst.instrument_id,
-                            ts=ts.date() if hasattr(ts, "date") else ts,
-                            open=float(row["Open"]),
-                            high=float(row["High"]),
-                            low=float(row["Low"]),
-                            close=float(row["Close"]),
-                            adj_close=float(row["Adj Close"]),
-                            volume=int(row["Volume"]),
-                        )
+            ids = [inst.instrument_id for inst in instruments.values()]
+            rows = session.execute(
+                select(Instrument.symbol, OHLCV.ts, OHLCV.adj_close)
+                .join(OHLCV, OHLCV.instrument_id == Instrument.instrument_id)
+                .where(
+                    and_(
+                        Instrument.instrument_id.in_(ids),
+                        OHLCV.ts >= start,
+                        OHLCV.ts <= end,
                     )
-        session.commit()
-
-    def _read_frame(
-        self,
-        session: Session,
-        instruments: dict[str, Instrument],
-        start: date,
-        end: date,
-    ) -> pd.DataFrame:
-        ids = [inst.instrument_id for inst in instruments.values()]
-        rows = session.execute(
-            select(Instrument.symbol, OHLCV.ts, OHLCV.adj_close)
-            .join(OHLCV, OHLCV.instrument_id == Instrument.instrument_id)
-            .where(
-                and_(
-                    Instrument.instrument_id.in_(ids),
-                    OHLCV.ts >= start,
-                    OHLCV.ts <= end,
                 )
-            )
-            .order_by(OHLCV.ts, Instrument.symbol)
-        ).all()
+                .order_by(OHLCV.ts, Instrument.symbol)
+            ).all()
         if not rows:
             return pd.DataFrame()
         long = pd.DataFrame(rows, columns=["symbol", "ts", "adj_close"])
         return long.pivot(index="ts", columns="symbol", values="adj_close").sort_index()
+
+    # ---------- internals ----------
+
+    def _ensure_instruments(
+        self, session: Session, asset_class: str, market: str, tickers: list[str]
+    ) -> dict[str, Instrument]:
+        out: dict[str, Instrument] = {}
+        for symbol in tickers:
+            existing = session.execute(
+                select(Instrument).where(
+                    and_(
+                        Instrument.asset_class == asset_class,
+                        Instrument.market == market,
+                        Instrument.symbol == symbol,
+                    )
+                )
+            ).scalar_one_or_none()
+            if existing is None:
+                existing = Instrument(asset_class=asset_class, market=market, symbol=symbol)
+                session.add(existing)
+                session.flush()
+            out[symbol] = existing
+        return out
 
     def _reset_if_stale(self) -> None:
         """Drop ORM-managed tables if the on-disk schema doesn't match."""
@@ -302,9 +304,10 @@ class DatabaseNode(Node):
 class _AssetNode(Node):
     """Base for per-asset-class nodes.
 
-    To add a new asset class, subclass and set three constants only —
-    ``ASSET_CLASS``, ``MARKET``, and ``PARAMS`` with a default ticker CSV.
-    All DB and adaptor work lives in ``DataStore``.
+    Shared ports + two constants (``ASSET_CLASS``, ``MARKET``). Each
+    subclass writes its own ``process`` — pick an adaptor, call
+    ``store.fetch_gaps(..., adaptor)``, then ``store.read_frame(...)``.
+    Free to skip either step or glue in its own logic.
     """
 
     CATEGORY = "data"
@@ -312,10 +315,6 @@ class _AssetNode(Node):
     OUTPUTS = {"frame": "frame"}
     ASSET_CLASS: str = ""
     MARKET: str = ""
-
-    def process(self, store: DataStore, start: date, end: date) -> dict:
-        tickers = _split_csv(self.params["tickers"])
-        return {"frame": store.load_frame(self.ASSET_CLASS, self.MARKET, tickers, start, end)}
 
 
 @register_node("data/USEquity")
@@ -326,6 +325,11 @@ class USEquityNode(_AssetNode):
     MARKET = "US"
     PARAMS = {"tickers": ("str", US_EQUITIES_DEFAULT)}
 
+    def process(self, store: DataStore, start: date, end: date) -> dict:
+        tickers = _split_csv(self.params["tickers"])
+        store.fetch_gaps(self.ASSET_CLASS, self.MARKET, tickers, start, end, YfAdaptor())
+        return {"frame": store.read_frame(self.ASSET_CLASS, self.MARKET, tickers, start, end)}
+
 
 @register_node("data/UKEquity")
 class UKEquityNode(_AssetNode):
@@ -335,6 +339,11 @@ class UKEquityNode(_AssetNode):
     MARKET = "UK"
     PARAMS = {"tickers": ("str", UK_EQUITIES_DEFAULT)}
 
+    def process(self, store: DataStore, start: date, end: date) -> dict:
+        tickers = _split_csv(self.params["tickers"])
+        store.fetch_gaps(self.ASSET_CLASS, self.MARKET, tickers, start, end, YfAdaptor())
+        return {"frame": store.read_frame(self.ASSET_CLASS, self.MARKET, tickers, start, end)}
+
 
 @register_node("data/FX")
 class FXNode(_AssetNode):
@@ -343,6 +352,11 @@ class FXNode(_AssetNode):
     ASSET_CLASS = "FX"
     MARKET = "FX"
     PARAMS = {"tickers": ("str", FX_PAIRS_DEFAULT)}
+
+    def process(self, store: DataStore, start: date, end: date) -> dict:
+        tickers = _split_csv(self.params["tickers"])
+        store.fetch_gaps(self.ASSET_CLASS, self.MARKET, tickers, start, end, YfAdaptor())
+        return {"frame": store.read_frame(self.ASSET_CLASS, self.MARKET, tickers, start, end)}
 
 
 @register_node("data/Aggregate")
