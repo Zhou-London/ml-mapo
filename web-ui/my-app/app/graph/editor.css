@@ -626,8 +626,7 @@
   top: 50%;
   transform: translateY(-50%);
   width: 22px;
-  min-height: 80px;
-  padding: 12px 0;
+  height: 56px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -636,10 +635,8 @@
   border: 1px solid var(--border);
   cursor: pointer;
   font: inherit;
-  font-size: 10px;
-  letter-spacing: 0.18em;
-  text-transform: uppercase;
-  writing-mode: vertical-rl;
+  font-size: 12px;
+  line-height: 1;
   user-select: none;
   z-index: 5;
   transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
@@ -658,9 +655,46 @@
   right: 0;
   border-right: none;
   border-radius: 6px 0 0 6px;
-  /* Vertical-rl reads top-to-bottom; flip the right tab so the word still
-     reads left-to-right when tilted. */
-  transform: translateY(-50%) rotate(180deg);
+}
+
+.editor-menu {
+  position: relative;
+}
+.editor-menu-popover {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 6px);
+  min-width: 160px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  z-index: 20;
+}
+.editor-menu-item {
+  display: block;
+  width: 100%;
+  padding: 8px 10px;
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  color: var(--text);
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  text-decoration: none;
+}
+.editor-menu-item:hover {
+  background: var(--bg-elev);
+}
+.editor-menu-item:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 /* ---------- light-mode polish ---------- */

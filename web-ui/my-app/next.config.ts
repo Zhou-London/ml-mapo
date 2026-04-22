@@ -8,6 +8,14 @@ const config: NextConfig = {
   // The floating "N" dev-mode badge sits in the bottom-left and overlaps
   // the palette hint in the graph editor — hide it.
   devIndicators: false,
+  // pdoc generates a static site under public/docs/. Next doesn't auto-serve
+  // directory indexes, so /docs and /docs/ need to map to the index file.
+  async rewrites() {
+    return [
+      { source: "/docs", destination: "/docs/index.html" },
+      { source: "/docs/", destination: "/docs/index.html" },
+    ];
+  },
 };
 
 export default config;

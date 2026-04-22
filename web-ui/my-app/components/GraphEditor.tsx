@@ -151,6 +151,8 @@ export default function GraphEditor() {
   const [selectedNode, setSelectedNode] =
     useState<import("@comfyorg/litegraph").LGraphNode | null>(null);
   const [inspectorRev, setInspectorRev] = useState(0);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement | null>(null);
 
   const deferredQuery = useDeferredValue(paletteQuery);
   const canvasElRef = useRef<HTMLCanvasElement | null>(null);
@@ -205,7 +207,6 @@ export default function GraphEditor() {
   const loadPersistedGraph = useCallback(async () => {
     const handles = lgRef.current;
     if (!handles) return;
-    setStatus({ kind: "loading", text: "loading graph…" });
     try {
       const response = await fetch("/api/graph");
       if (!response.ok) {
@@ -220,10 +221,7 @@ export default function GraphEditor() {
       refreshHud(doc);
       setDirty(false);
       scheduleFit(lgRef);
-      setStatus({
-        kind: "ok",
-        text: `loaded graph · ${doc.nodes.length} nodes, ${doc.edges.length} edges`,
-      });
+      setStatus(null);
     } catch (error) {
       setStatus({ kind: "err", text: `graph load failed: ${errorMessage(error)}` });
     }
@@ -486,6 +484,23 @@ export default function GraphEditor() {
     setTheme((current) => (current === "dark" ? "light" : "dark"));
   }, []);
 
+  useEffect(() => {
+    if (!menuOpen) return;
+    function onPointerDown(event: PointerEvent) {
+      if (menuRef.current?.contains(event.target as Node)) return;
+      setMenuOpen(false);
+    }
+    function onEscape(event: KeyboardEvent) {
+      if (event.key === "Escape") setMenuOpen(false);
+    }
+    window.addEventListener("pointerdown", onPointerDown);
+    window.addEventListener("keydown", onEscape);
+    return () => {
+      window.removeEventListener("pointerdown", onPointerDown);
+      window.removeEventListener("keydown", onEscape);
+    };
+  }, [menuOpen]);
+
   const startResize = useCallback(
     (target: "palette" | "inspector") =>
       (event: React.PointerEvent<HTMLDivElement>) => {
@@ -513,17 +528,32 @@ export default function GraphEditor() {
       if (!workspace) return;
       const rect = workspace.getBoundingClientRect();
       if (target === "palette") {
+        const raw = event.clientX - rect.left;
+        // Narrower than MIN → hide panel, restore default size so it reopens normally.
+        if (raw < SIDEBAR_MIN - 40) {
+          setPaletteOpen(false);
+          setSidebarWidth(SIDEBAR_DEFAULT);
+          stopResize();
+          return;
+        }
         const maxWidth = Math.min(
           SIDEBAR_MAX,
           Math.max(SIDEBAR_MIN, rect.width - 320),
         );
-        setSidebarWidth(clamp(event.clientX - rect.left, SIDEBAR_MIN, maxWidth));
+        setSidebarWidth(clamp(raw, SIDEBAR_MIN, maxWidth));
       } else {
+        const raw = rect.right - event.clientX;
+        if (raw < INSPECTOR_MIN - 40) {
+          setInspectorOpen(false);
+          setInspectorWidth(INSPECTOR_DEFAULT);
+          stopResize();
+          return;
+        }
         const maxWidth = Math.min(
           INSPECTOR_MAX,
           Math.max(INSPECTOR_MIN, rect.width - 320),
         );
-        setInspectorWidth(clamp(rect.right - event.clientX, INSPECTOR_MIN, maxWidth));
+        setInspectorWidth(clamp(raw, INSPECTOR_MIN, maxWidth));
       }
     }
 
@@ -637,44 +667,79 @@ export default function GraphEditor() {
         </div>
         <div className="editor-spacer" />
         <div className="editor-actions">
-          <span
-            className={"editor-status" + (status ? " " + status.kind : "")}
-            role="status"
-            aria-live="polite"
-            data-testid="editor-hud"
-          >
-            <span className="dot" aria-hidden="true" />
-            <span className="text">{status?.text ?? "ready"}</span>
-            {dirty ? <span className="dirty">unsaved</span> : null}
-          </span>
-          <button className="editor-btn" onClick={fitView} title="Fit graph to view">
-            Fit
-          </button>
-          <button className="editor-btn" onClick={reload} title="Reload graph from disk">
-            Reload
-          </button>
           <button
-            className="editor-btn"
-            onClick={toggleTheme}
-            title={`Switch to ${theme === "dark" ? "light" : "dark"} mode`}
-          >
-            {theme === "dark" ? "Light Mode" : "Dark Mode"}
-          </button>
-          <button
-            className="editor-btn"
+            className="editor-btn primary"
             onClick={run}
             disabled={running}
             title="Save the current graph and execute one tick"
           >
             {running ? "Running…" : "Run"}
           </button>
-          <button
-            className="editor-btn primary"
-            onClick={save}
-            title="Save graph to disk (⌘/Ctrl+S)"
-          >
-            Save
-          </button>
+          <div className="editor-menu" ref={menuRef}>
+            <button
+              className="editor-btn"
+              onClick={() => setMenuOpen((o) => !o)}
+              aria-expanded={menuOpen}
+              aria-haspopup="menu"
+              title="Actions"
+            >
+              Menu ▾
+            </button>
+            {menuOpen ? (
+              <div className="editor-menu-popover" role="menu">
+                <button
+                  className="editor-menu-item"
+                  role="menuitem"
+                  onClick={() => {
+                    setMenuOpen(false);
+                    save();
+                  }}
+                >
+                  Save
+                </button>
+                <button
+                  className="editor-menu-item"
+                  role="menuitem"
+                  onClick={() => {
+                    setMenuOpen(false);
+                    fitView();
+                  }}
+                >
+                  Fit graph
+                </button>
+                <button
+                  className="editor-menu-item"
+                  role="menuitem"
+                  onClick={() => {
+                    setMenuOpen(false);
+                    reload();
+                  }}
+                >
+                  Reload
+                </button>
+                <button
+                  className="editor-menu-item"
+                  role="menuitem"
+                  onClick={() => {
+                    setMenuOpen(false);
+                    toggleTheme();
+                  }}
+                >
+                  {theme === "dark" ? "Light mode" : "Dark mode"}
+                </button>
+                <a
+                  className="editor-menu-item"
+                  role="menuitem"
+                  href="/docs/"
+                  target="_blank"
+                  rel="noreferrer"
+                  onClick={() => setMenuOpen(false)}
+                >
+                  Docs ↗
+                </a>
+              </div>
+            ) : null}
+          </div>
         </div>
       </header>
 
@@ -768,7 +833,7 @@ export default function GraphEditor() {
               title="Show node palette"
               aria-label="Show node palette"
             >
-              Drop
+              ▶
             </button>
           ) : null}
           {!inspectorOpen ? (
@@ -778,7 +843,7 @@ export default function GraphEditor() {
               title="Show inspector"
               aria-label="Show inspector"
             >
-              Drop
+              ◀
             </button>
           ) : null}
           <div className="editor-canvas-meta" aria-hidden="true">
