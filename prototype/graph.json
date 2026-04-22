@@ -154,9 +154,9 @@
     },
     {
       "src_node": "db",
-      "src_port": "engine",
+      "src_port": "store",
       "dst_node": "us",
-      "dst_port": "engine"
+      "dst_port": "store"
     },
     {
       "src_node": "date",
@@ -172,9 +172,9 @@
     },
     {
       "src_node": "db",
-      "src_port": "engine",
+      "src_port": "store",
       "dst_node": "uk",
-      "dst_port": "engine"
+      "dst_port": "store"
     },
     {
       "src_node": "us",
