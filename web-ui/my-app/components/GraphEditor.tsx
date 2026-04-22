@@ -11,7 +11,7 @@ import {
 import "@comfyorg/litegraph/style.css";
 import { LGraph, LGraphCanvas, LiteGraph } from "@comfyorg/litegraph";
 
-import type { GraphDoc, NodeSchema, RunResult } from "@/lib/types";
+import type { GraphDoc, GraphNode, NodeSchema, RunResult } from "@/lib/types";
 import {
   NODE_ACTIVE_KEY,
   NODE_DISABLED_KEY,
@@ -160,6 +160,11 @@ export default function GraphEditor() {
   const lgRef = useRef<LGContextHandles | null>(null);
   const schemasRef = useRef<NodeSchema[] | null>(null);
   const resizingRef = useRef<"palette" | "inspector" | null>(null);
+  const historyRef = useRef<GraphDoc[]>([]);
+  const redoRef = useRef<GraphDoc[]>([]);
+  const currentSnapshotRef = useRef<GraphDoc | null>(null);
+  const clipboardRef = useRef<GraphNode | null>(null);
+  const suppressHistoryRef = useRef(false);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -215,13 +220,18 @@ export default function GraphEditor() {
       }
       const doc = (await response.json()) as GraphDoc;
       setSelectedNode(null);
+      suppressHistoryRef.current = true;
       loadIntoGraph(handles.graph, doc);
+      suppressHistoryRef.current = false;
       applyGraphTheme(handles.graph, theme);
       handles.graph.start();
       refreshHud(doc);
       setDirty(false);
       scheduleFit(lgRef);
       setStatus(null);
+      historyRef.current = [];
+      redoRef.current = [];
+      currentSnapshotRef.current = doc;
     } catch (error) {
       setStatus({ kind: "err", text: `graph load failed: ${errorMessage(error)}` });
     }
@@ -263,6 +273,24 @@ export default function GraphEditor() {
         setDirty(true);
         refreshHud();
       };
+      const snap = () => {
+        const handles = lgRef.current;
+        if (!handles || suppressHistoryRef.current) return;
+        const doc = saveFromGraph(handles.graph);
+        const cur = currentSnapshotRef.current;
+        if (cur && JSON.stringify(cur) === JSON.stringify(doc)) return;
+        if (cur) {
+          historyRef.current.push(cur);
+          if (historyRef.current.length > 50) historyRef.current.shift();
+          redoRef.current = [];
+        }
+        currentSnapshotRef.current = doc;
+      };
+      const defer = () => queueMicrotask(snap);
+      graph.onNodeAdded = defer;
+      graph.onNodeRemoved = defer;
+      graph.onConnectionChange = defer;
+      canvas.onNodeMoved = defer;
       canvas.onNodeSelected = (node) => setSelectedNode(node);
       canvas.onNodeDeselected = () => setSelectedNode(null);
       lgRef.current = { graph, canvas };
@@ -484,6 +512,80 @@ export default function GraphEditor() {
     setTheme((current) => (current === "dark" ? "light" : "dark"));
   }, []);
 
+  const restoreSnapshot = useCallback(
+    (doc: GraphDoc) => {
+      const handles = lgRef.current;
+      if (!handles) return;
+      suppressHistoryRef.current = true;
+      loadIntoGraph(handles.graph, doc);
+      suppressHistoryRef.current = false;
+      applyGraphTheme(handles.graph, theme);
+      handles.canvas.setDirty(true, true);
+      currentSnapshotRef.current = doc;
+      refreshHud(doc);
+      setDirty(true);
+      setSelectedNode(null);
+    },
+    [refreshHud, theme],
+  );
+
+  const undo = useCallback(() => {
+    const prev = historyRef.current.pop();
+    if (!prev) return;
+    const cur = currentSnapshotRef.current;
+    if (cur) redoRef.current.push(cur);
+    restoreSnapshot(prev);
+  }, [restoreSnapshot]);
+
+  const redo = useCallback(() => {
+    const next = redoRef.current.pop();
+    if (!next) return;
+    const cur = currentSnapshotRef.current;
+    if (cur) historyRef.current.push(cur);
+    restoreSnapshot(next);
+  }, [restoreSnapshot]);
+
+  const copyNode = useCallback(() => {
+    const handles = lgRef.current;
+    if (!handles) return;
+    // Read the live selection straight from LiteGraph — selectedNode state may
+    // lag when keydown fires right after a canvas click.
+    const selected =
+      handles.canvas.selected_nodes && Object.values(handles.canvas.selected_nodes)[0];
+    if (!selected) return;
+    const id = String(
+      (selected as unknown as Record<string, unknown>)[NODE_ID_KEY] ??
+        (selected as { id?: string | number }).id ??
+        "",
+    );
+    const doc = saveFromGraph(handles.graph);
+    const node = doc.nodes.find((n) => n.id === id);
+    if (node) clipboardRef.current = node;
+  }, []);
+
+  const pasteNode = useCallback(() => {
+    const handles = lgRef.current;
+    const snap = clipboardRef.current;
+    if (!handles || !snap) return;
+    const cur = saveFromGraph(handles.graph);
+    const base = snap.id;
+    let newId = `${base}_copy`;
+    let n = 1;
+    while (cur.nodes.some((x) => x.id === newId)) {
+      n += 1;
+      newId = `${base}_copy${n}`;
+    }
+    const newNode: GraphNode = {
+      ...snap,
+      id: newId,
+      pos: [(snap.pos?.[0] ?? 0) + 30, (snap.pos?.[1] ?? 0) + 30],
+    };
+    const prevSnap = currentSnapshotRef.current;
+    if (prevSnap) historyRef.current.push(prevSnap);
+    redoRef.current = [];
+    restoreSnapshot({ nodes: [...cur.nodes, newNode], edges: cur.edges });
+  }, [restoreSnapshot]);
+
   useEffect(() => {
     if (!menuOpen) return;
     function onPointerDown(event: PointerEvent) {
@@ -570,14 +672,43 @@ export default function GraphEditor() {
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
+      const mod = event.ctrlKey || event.metaKey;
+      if (!mod) return;
+      const key = event.key.toLowerCase();
+
+      // Save: always global (override browser "save page").
+      if (key === "s") {
         event.preventDefault();
         void save();
+        return;
+      }
+
+      // Let text fields keep their native shortcuts (copy/paste/undo in inputs).
+      const target = event.target as HTMLElement | null;
+      const inField = !!target && (
+        target.tagName === "INPUT" ||
+        target.tagName === "TEXTAREA" ||
+        target.isContentEditable
+      );
+      if (inField) return;
+
+      if (key === "z" && !event.shiftKey) {
+        event.preventDefault();
+        undo();
+      } else if ((key === "z" && event.shiftKey) || key === "y") {
+        event.preventDefault();
+        redo();
+      } else if (key === "c") {
+        event.preventDefault();
+        copyNode();
+      } else if (key === "v") {
+        event.preventDefault();
+        pasteNode();
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [save]);
+  }, [save, undo, redo, copyNode, pasteNode]);
 
   useEffect(() => {
     const el = canvasElRef.current;
