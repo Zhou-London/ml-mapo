@@ -29,22 +29,6 @@
       ]
     },
     {
-      "id": "alpha",
-      "type": "forecast/Alpha",
-      "params": {
-        "factors": "momentum_12_1",
-        "information_ratios": ""
-      },
-      "pos": [
-        880,
-        380
-      ],
-      "size": [
-        210,
-        125
-      ]
-    },
-    {
       "id": "cov",
       "type": "risk/Covariance",
       "params": {
@@ -74,21 +58,6 @@
       "size": [
         210,
         133
-      ]
-    },
-    {
-      "id": "us",
-      "type": "data/USEquity",
-      "params": {
-        "tickers": "NVDA,AAPL,MSFT,AMZN,GOOGL,META,TSLA,AVGO,COST,NFLX"
-      },
-      "pos": [
-        404,
-        172
-      ],
-      "size": [
-        210,
-        127
       ]
     },
     {
@@ -132,6 +101,37 @@
       "pos": [
         -1,
         97
+      ],
+      "size": [
+        210,
+        127
+      ]
+    },
+    {
+      "id": "alpha",
+      "type": "forecast/Alpha",
+      "params": {
+        "factors": "momentum_12_1",
+        "information_ratios": ""
+      },
+      "pos": [
+        880,
+        380
+      ],
+      "size": [
+        210,
+        125
+      ]
+    },
+    {
+      "id": "us",
+      "type": "data/USEquity",
+      "params": {
+        "tickers": "NVDA,AAPL,MSFT,AMZN,GOOGL,META,TSLA,AVGO,COST,NFLX"
+      },
+      "pos": [
+        404,
+        172
       ],
       "size": [
         210,
