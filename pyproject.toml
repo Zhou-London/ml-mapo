@@ -16,3 +16,8 @@ dependencies = [
     "torch>=2.10.0",
     "yfinance>=1.2.0",
 ]
+
+[dependency-groups]
+dev = [
+    "pdoc>=16.0.0",
+]

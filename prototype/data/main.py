@@ -23,8 +23,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import pandas as pd
-from adaptors import DataSourceAdaptor, YfAdaptor
 from graph import Node, register_node
+
+try:
+    from .adaptors import DataSourceAdaptor, YfAdaptor
+except ImportError:  # loaded bare (via node_loader), not as a package
+    from adaptors import DataSourceAdaptor, YfAdaptor
 from sqlalchemy import (
     BigInteger,
     Date,

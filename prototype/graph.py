@@ -21,7 +21,9 @@ port names at load/save time.
 
 from __future__ import annotations
 
+import inspect
 import json
+import textwrap
 import time
 from collections import defaultdict
 from dataclasses import asdict, dataclass, field
@@ -99,15 +101,36 @@ def get_node_class(type_name: str) -> type[Node]:
         ) from e
 
 
+_PROTOTYPE_DIR = Path(__file__).resolve().parent
+
+
+def _docs_href(cls: type[Node]) -> str:
+    """Relative URL into the generated pdoc site (e.g. ``data/main.html#USEquityNode``).
+
+    Empty when the class's source file is outside ``prototype/`` — pdoc only
+    documents modules under that tree.
+    """
+    try:
+        source = Path(inspect.getsourcefile(cls) or "").resolve()
+        rel = source.relative_to(_PROTOTYPE_DIR)
+    except (TypeError, ValueError):
+        return ""
+    return f"{rel.with_suffix('.html').as_posix()}#{cls.__name__}"
+
+
 def all_node_schemas() -> list[dict[str, Any]]:
     """Dump every registered node's schema for the editor palette."""
     schemas: list[dict[str, Any]] = []
     for type_name, cls in sorted(_REGISTRY.items()):
+        raw_doc = textwrap.dedent(cls.__doc__ or "").strip()
+        first_line = raw_doc.splitlines()[0] if raw_doc else ""
         schemas.append(
             {
                 "type": type_name,
                 "category": cls.CATEGORY,
-                "doc": (cls.__doc__ or "").strip().splitlines()[0] if cls.__doc__ else "",
+                "doc": first_line,
+                "doc_full": raw_doc,
+                "docs_href": _docs_href(cls),
                 "inputs": [{"name": k, "type": v} for k, v in cls.INPUTS.items()],
                 "outputs": [{"name": k, "type": v} for k, v in cls.OUTPUTS.items()],
                 "params": [

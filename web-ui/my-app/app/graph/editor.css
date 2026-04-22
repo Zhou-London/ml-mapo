@@ -520,6 +520,22 @@
   letter-spacing: 0.1em;
   text-transform: uppercase;
 }
+.editor-inspector-description {
+  margin: 0 0 8px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text);
+  white-space: pre-wrap;
+}
+.editor-inspector-docs-link {
+  display: inline-block;
+  font-size: 11px;
+  color: var(--accent, #4b8df8);
+  text-decoration: none;
+}
+.editor-inspector-docs-link:hover {
+  text-decoration: underline;
+}
 .editor-inspector-row {
   display: grid;
   grid-template-columns: 90px 1fr;

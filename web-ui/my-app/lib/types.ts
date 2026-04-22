@@ -13,6 +13,8 @@ export interface NodeSchema {
   type: string;
   category: string;
   doc?: string;
+  doc_full?: string;
+  docs_href?: string;
   inputs: SchemaPort[];
   outputs: SchemaPort[];
   params: SchemaParam[];

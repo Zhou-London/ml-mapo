@@ -818,6 +818,7 @@ export default function GraphEditor() {
           <NodeInspector
             node={selectedNode}
             rev={inspectorRev}
+            schemas={schemas}
             onChangeParam={updateNodeParam}
             onToggleDisabled={toggleNodeDisabled}
             onClose={toggleInspector}
@@ -831,6 +832,7 @@ export default function GraphEditor() {
 interface NodeInspectorProps {
   node: import("@comfyorg/litegraph").LGraphNode | null;
   rev: number;
+  schemas: NodeSchema[] | null;
   onChangeParam: (paramName: string, nextValue: unknown) => void;
   onToggleDisabled: () => void;
   onClose: () => void;
@@ -838,6 +840,7 @@ interface NodeInspectorProps {
 
 function NodeInspector({
   node,
+  schemas,
   onChangeParam,
   onToggleDisabled,
   onClose,
@@ -845,12 +848,15 @@ function NodeInspector({
   const disabled = !!(node as unknown as Record<string, unknown> | null)?.[
     NODE_DISABLED_KEY
   ];
+  const nodeType = (node as { type?: string } | null)?.type ?? "";
+  const schema = schemas?.find((s) => s.type === nodeType) ?? null;
+  const description = schema?.doc_full?.trim() || schema?.doc?.trim() || "";
   return (
     <aside className="editor-inspector" aria-label="Node inspector">
       <header className="editor-panel-header">
         <h3>Inspector</h3>
         {node ? (
-          <span className="count">{(node as { type?: string }).type ?? ""}</span>
+          <span className="count">{nodeType}</span>
         ) : null}
         <button
           className="editor-panel-collapse"
@@ -865,6 +871,24 @@ function NodeInspector({
         <p className="editor-inspector-empty">Select a node to see its details.</p>
       ) : (
         <div className="editor-inspector-body">
+          {description || schema?.docs_href ? (
+            <section className="editor-inspector-section">
+              <h4>Description</h4>
+              {description ? (
+                <p className="editor-inspector-description">{description}</p>
+              ) : null}
+              {schema?.docs_href ? (
+                <a
+                  className="editor-inspector-docs-link"
+                  href={`/docs/${schema.docs_href}`}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  Full docs ↗
+                </a>
+              ) : null}
+            </section>
+          ) : null}
           <section className="editor-inspector-section">
             <h4>Identity</h4>
             <div className="editor-inspector-row">
