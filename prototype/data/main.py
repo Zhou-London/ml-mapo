@@ -13,7 +13,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import pandas as pd
 import zmq
 from _logging import get_logger, run_module
-from adaptors import DataSourceAdaptor, YfAdaptor
+from adaptors import BondAdaptor, DataSourceAdaptor, YfAdaptor
+from bond_adaptors import (
+    EU_BOND_TICKERS,
+    UK_BOND_TICKERS,
+    US_BOND_TICKERS,
+    YfBondAdaptor,
+)
 from sqlalchemy import (
     BigInteger,
     Date,
@@ -36,13 +42,14 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
 """--- Config start ---"""
 # DB Connection
-DB_URL = "postgresql+psycopg2://postgres:password@localhost:6543/postgres"
+DB_URL = "postgresql+psycopg2://postgres:6602@localhost:5434/postgres"
 PUB_ADDR = "tcp://*:5555"
 TOPIC_OHLCV = b"OHLCV"
 
 # Asset class definitions
 ASSET_CLASS_EQUITY = "EQUITY"
-ASSET_CLASS_FX = "FX"
+ASSET_CLASS_FX     = "FX"
+ASSET_CLASS_BOND   = "BOND"
 
 
 @dataclass(frozen=True)
@@ -115,25 +122,56 @@ FX_PAIRS = [
     "AUDUSD=X",
     "JPYUSD=X",
 ]
+# ---------------------------------------------------------------------------
+# Bond tickers — sourced from bond_adaptors.py
+# ---------------------------------------------------------------------------
+# US_BOND_TICKERS  : SGOV, BIL, SHY, VGSH, IEF, VGIT, TLH, TLT, VGLT, GOVT
+# UK_BOND_TICKERS  : IGLT.L, VGOV.L, GILS.L, GLTY.L, IGLS.L, GLTA.L, INXG.L
+# EU_BOND_TICKERS  : IEGA.L, VETY.L, EXX6.DE, IS04.L, EXVM.DE, IBCI.L, IBGL.L
+
+_bond_adaptor_us = YfBondAdaptor()
+_bond_adaptor_uk = YfBondAdaptor()
+_bond_adaptor_eu = YfBondAdaptor()
 
 INSTRUMENT_UNIVERSES: list[InstrumentUniverse] = [
+    # ── Equities ──────────────────────────────────────────────────────────
     InstrumentUniverse(
         asset_class=ASSET_CLASS_EQUITY,
         market="US",
-        adaptor=YfAdaptor(),
+        adaptor=YfAdaptor(asset_class=ASSET_CLASS_EQUITY),
         tickers=US_EQUITIES,
     ),
     InstrumentUniverse(
         asset_class=ASSET_CLASS_EQUITY,
         market="UK",
-        adaptor=YfAdaptor(),
+        adaptor=YfAdaptor(asset_class=ASSET_CLASS_EQUITY),
         tickers=UK_EQUITIES,
     ),
+    # ── FX ────────────────────────────────────────────────────────────────
     InstrumentUniverse(
         asset_class=ASSET_CLASS_FX,
         market="FX",
-        adaptor=YfAdaptor(),
+        adaptor=YfAdaptor(asset_class=ASSET_CLASS_FX),
         tickers=FX_PAIRS,
+    ),
+    # ── Bonds ─────────────────────────────────────────────────────────────
+    InstrumentUniverse(
+        asset_class=ASSET_CLASS_BOND,
+        market="US",
+        adaptor=_bond_adaptor_us,
+        tickers=US_BOND_TICKERS,
+    ),
+    InstrumentUniverse(
+        asset_class=ASSET_CLASS_BOND,
+        market="UK",
+        adaptor=_bond_adaptor_uk,
+        tickers=UK_BOND_TICKERS,
+    ),
+    InstrumentUniverse(
+        asset_class=ASSET_CLASS_BOND,
+        market="EU",
+        adaptor=_bond_adaptor_eu,
+        tickers=EU_BOND_TICKERS,
     ),
 ]
 
@@ -192,6 +230,24 @@ class FxDetail(Base):
     quote_currency: Mapped[str] = mapped_column(String(8), nullable=False)
 
 
+class BondDetail(Base):
+    """Bond-specific static attributes — one row per instrument."""
+
+    __tablename__ = "bond_details"
+
+    instrument_id: Mapped[int] = mapped_column(
+        ForeignKey("instruments.instrument_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    isin: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    issuer: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    maturity_bucket: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    credit_rating: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    coupon_rate: Mapped[float | None] = mapped_column(Float, nullable=True)   # decimal
+    currency: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    region: Mapped[str | None] = mapped_column(String(8), nullable=True)      # US/UK/EU
+
+
 class OHLCV(Base):
     """Daily OHLCV bar keyed by (instrument_id, ts). `ts` is the hypertable partition column."""
 
@@ -208,6 +264,42 @@ class OHLCV(Base):
     close: Mapped[float] = mapped_column(Float, nullable=False)
     adj_close: Mapped[float] = mapped_column(Float, nullable=False)
     volume: Mapped[int] = mapped_column(BigInteger, nullable=False)
+
+
+class BondBar(Base):
+    """Daily bond bar keyed by (instrument_id, ts).
+
+    Stores the MAPIS Fixed Income critical fields (★) plus supplementary
+    fields needed by the risk and alpha layers.
+    ts is the hypertable partition column.
+    """
+
+    __tablename__ = "bond_bar"
+
+    instrument_id: Mapped[int] = mapped_column(
+        ForeignKey("instruments.instrument_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    ts: Mapped[date] = mapped_column(Date, primary_key=True)
+    price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # "yield" is a Python keyword — SQLAlchemy column alias used here
+    yield_to_maturity: Mapped[float | None] = mapped_column(
+        "yield_to_maturity", Float, nullable=True
+    )                                                                # ★ MAPIS
+    yield_change: Mapped[float | None] = mapped_column(
+        Float, nullable=True
+    )                                                                # ★ MAPIS
+    spread_vs_benchmark: Mapped[float | None] = mapped_column(
+        Float, nullable=True
+    )                                                                # ★ MAPIS
+    duration: Mapped[float | None] = mapped_column(Float, nullable=True)
+    coupon_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
+    rolling_vol_21d: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+
+# ---------------------------------------------------------------------------
+# Database setup
+# ---------------------------------------------------------------------------
 
 
 def _schema_matches(engine) -> bool:
@@ -248,11 +340,17 @@ def setup_database():
             with engine.begin() as conn:
                 conn.execute(
                     text(
-                        "SELECT create_hypertable('ohlcv', 'ts', "
+                        "SELECT create_hypertable('ohlcv', by_range('ts'::name), "
                         "if_not_exists => TRUE, migrate_data => TRUE);"
                     )
                 )
-            log.info("hypertable ready", table="ohlcv")
+                conn.execute(
+                    text(
+                        "SELECT create_hypertable('bond_bar', by_range('ts'::name), "
+                        "if_not_exists => TRUE, migrate_data => TRUE);"
+                    )
+                )
+            log.info("hypertables ready", tables=["ohlcv", "bond_bar"])
         except OperationalError as e:
             log.error(
                 "cannot connect to database",
@@ -283,6 +381,21 @@ def _make_detail(universe: InstrumentUniverse, symbol: str):
     if universe.asset_class == ASSET_CLASS_FX:
         base, quote = _parse_fx_symbol(symbol)
         return FxDetail(base_currency=base, quote_currency=quote)
+    if universe.asset_class == ASSET_CLASS_BOND:
+        from bond_adaptors import _ALL_ETF_UNIVERSE
+        meta = _ALL_ETF_UNIVERSE.get(symbol)
+        if meta:
+            # 8-tuple: (desc, bucket, isin, issuer, coupon_pct, rating, currency, region)
+            return BondDetail(
+                isin=meta[2],
+                issuer=meta[3],
+                maturity_bucket=meta[1],
+                credit_rating=meta[5],
+                coupon_rate=meta[4] / 100.0,  # store as decimal
+                currency=meta[6],
+                region=meta[7],
+            )
+        return BondDetail()
     raise ValueError(f"unknown asset_class: {universe.asset_class!r}")
 
 
@@ -337,6 +450,40 @@ def _row_to_orm(instrument_id: int, ts, row) -> OHLCV:
     )
 
 
+def _row_to_bond_orm(instrument_id: int, ts, row) -> BondBar:
+    """Convert a DataFrame row to a BondBar ORM object.
+
+    All MAPIS fields are nullable — a NaN from the adaptor is stored as NULL
+    rather than failing the whole fetch.
+    """
+    def _f(key: str) -> float | None:
+        v = row.get(key)
+        if v is None:
+            return None
+        try:
+            f = float(v)
+            return None if (f != f) else f   # NaN check
+        except (TypeError, ValueError):
+            return None
+
+    return BondBar(
+        instrument_id=instrument_id,
+        ts=ts.date() if hasattr(ts, "date") else ts,
+        price=_f("price"),
+        yield_to_maturity=_f("yield_to_maturity"),
+        yield_change=_f("yield_change"),
+        spread_vs_benchmark=_f("spread_vs_benchmark"),
+        duration=_f("duration"),
+        coupon_rate=_f("coupon_rate"),
+        rolling_vol_21d=_f("rolling_vol_21d"),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Gap detection
+# ---------------------------------------------------------------------------
+
+
 def find_missing_ranges(
     session, instrument_id: int, start: date, end: date
 ) -> list[tuple[date, date]]:
@@ -350,7 +497,29 @@ def find_missing_ranges(
             )
         )
     ).one()
+    if min_ts is None:
+        return [(start, end)]
+    gaps: list[tuple[date, date]] = []
+    if start < min_ts:
+        gaps.append((start, min_ts - timedelta(days=1)))
+    if max_ts < end:
+        gaps.append((max_ts + timedelta(days=1), end))
+    return gaps
 
+
+def find_missing_ranges_bond(
+    session, instrument_id: int, start: date, end: date
+) -> list[tuple[date, date]]:
+    """Return (lo, hi) tuples covering missing-day gaps in [start, end] for BondBar."""
+    min_ts, max_ts = session.execute(
+        select(func.min(BondBar.ts), func.max(BondBar.ts)).where(
+            and_(
+                BondBar.instrument_id == instrument_id,
+                BondBar.ts >= start,
+                BondBar.ts <= end,
+            )
+        )
+    ).one()
     if min_ts is None:
         return [(start, end)]
 
@@ -368,11 +537,13 @@ def fetch_range(
     symbol: str,
     lo: date,
     hi: date,
-) -> list[OHLCV]:
-    """Fetch OHLCV rows for [lo, hi] from the adaptor and convert to ORM objects."""
-    df = adaptor.fetch_ohlcv(symbol, lo, hi)
+) -> list[OHLCV] | list[BondBar]:
+    """Fetch bars via the unified fetch_data() interface and return ORM objects."""
+    df = adaptor.fetch_data(symbol, lo, hi)
     if df.empty:
         return []
+    if adaptor.asset_class == ASSET_CLASS_BOND:
+        return [_row_to_bond_orm(instrument_id, ts, row) for ts, row in df.iterrows()]
     return [_row_to_orm(instrument_id, ts, row) for ts, row in df.iterrows()]
 
 
@@ -401,8 +572,8 @@ def _fetch_with_retry(
     lo: date,
     hi: date,
     label: str,
-) -> list[OHLCV] | None:
-    """Fetch with retry loop: on error, prompt the user to retry or abort. Returns None if aborted."""
+) -> list[OHLCV] | list[BondBar] | None:
+    """Fetch with retry loop. Returns None if the user aborts."""
     while True:
         log.debug(
             "fetching range",
@@ -431,7 +602,12 @@ def fetch_and_store(
     start: date,
     end: date,
 ) -> None:
-    """Fetch missing OHLCV rows for all tickers in this universe and upsert them into the DB."""
+    """Fetch missing bars for all tickers in *universe* and upsert into the DB.
+
+    Routes gap detection and ORM conversion to the correct table (OHLCV or
+    BondBar) based on universe.asset_class.  Equity/FX paths are unchanged.
+    """
+    is_bond = universe.asset_class == ASSET_CLASS_BOND
     session_factory = sessionmaker(bind=engine, future=True)
     up_to_date = 0
     upserted_total = 0
@@ -440,7 +616,12 @@ def fetch_and_store(
         for symbol in universe.tickers:
             label = f"{universe.market}:{symbol}"
             instrument_id = ensure_instrument(session, universe, symbol)
-            gaps = find_missing_ranges(session, instrument_id, start, end)
+
+            gaps = (
+                find_missing_ranges_bond(session, instrument_id, start, end)
+                if is_bond
+                else find_missing_ranges(session, instrument_id, start, end)
+            )
             if not gaps:
                 up_to_date += 1
                 continue
@@ -487,18 +668,50 @@ def fetch_and_store(
     )
 
 
+# ---------------------------------------------------------------------------
+# Snapshot  (nested by asset class)
+# ---------------------------------------------------------------------------
+
+
+def _ac_key(asset_class: str) -> str:
+    """Normalise DB asset-class string ("EQUITY") to snapshot key ("equity").
+
+    The alpha service uses lowercase keys.  DB values stay uppercase.
+    """
+    return asset_class.lower()
+
+
 def load_snapshot(
     engine,
     universes: list[InstrumentUniverse],
     start: date,
     end: date,
-) -> dict[str, pd.DataFrame]:
-    """Load OHLCV rows for all tickers in the universes and return a snapshot dict."""
+) -> dict[str, dict[str, pd.DataFrame]]:
+    """Load bars for all tickers and return a nested multi-asset snapshot.
+
+    Structure:
+        {
+            "equity": { "US:AAPL": DataFrame, ... },
+            "fx":     { "FX:EURUSD=X": DataFrame, ... },
+            "bond":   { "US:TLT": DataFrame, "UK:IGLT.L": DataFrame, ... },
+        }
+
+    Each inner DataFrame is indexed by date.
+    Equity/FX DataFrames carry OHLCV columns.
+    Bond DataFrames carry MAPIS columns (yield_to_maturity, yield_change, etc.).
+    Tickers with fewer than 2 bars or zero variance are excluded with a warning.
+    """
     session_factory = sessionmaker(bind=engine, future=True)
-    snapshot: dict[str, pd.DataFrame] = {}
+    snapshot: dict[str, dict[str, pd.DataFrame]] = {}
+
     with session_factory() as session:
         for universe in universes:
+            ac_key = _ac_key(universe.asset_class)
+            bucket = snapshot.setdefault(ac_key, {})
+            is_bond = universe.asset_class == ASSET_CLASS_BOND
+
             for symbol in universe.tickers:
+                label = f"{universe.market}:{symbol}"
                 inst = session.execute(
                     select(Instrument).where(
                         and_(
@@ -510,57 +723,125 @@ def load_snapshot(
                 ).scalar_one_or_none()
                 if inst is None:
                     continue
-                rows = (
-                    session.execute(
-                        select(OHLCV)
-                        .where(
-                            and_(
-                                OHLCV.instrument_id == inst.instrument_id,
-                                OHLCV.ts >= start,
-                                OHLCV.ts <= end,
+
+                if is_bond:
+                    rows = (
+                        session.execute(
+                            select(BondBar)
+                            .where(
+                                and_(
+                                    BondBar.instrument_id == inst.instrument_id,
+                                    BondBar.ts >= start,
+                                    BondBar.ts <= end,
+                                )
                             )
+                            .order_by(BondBar.ts)
                         )
-                        .order_by(OHLCV.ts)
+                        .scalars()
+                        .all()
                     )
-                    .scalars()
-                    .all()
-                )
-                if not rows:
-                    continue
-                label = f"{universe.market}:{symbol}"
-                if len(rows) < 2:
-                    log.warn(
-                        "too few bars; excluding from snapshot",
-                        symbol=label,
-                        bars=len(rows),
-                        window_start=start.isoformat(),
-                        window_end=end.isoformat(),
-                        reason="need >=2 to form a return",
+                    if not rows:
+                        continue
+                    if len(rows) < 2:
+                        log.warn(
+                            "too few bars; excluding from snapshot",
+                            symbol=label,
+                            bars=len(rows),
+                            window_start=start.isoformat(),
+                            window_end=end.isoformat(),
+                            reason="need >=2 to form a yield change",
+                        )
+                        continue
+                    # yields = [r.yield_to_maturity for r in rows
+                    #           if r.yield_to_maturity is not None]
+                    # if yields and min(yields) == max(yields):
+                    #     log.warn(
+                    #         "constant yield; excluding from snapshot",
+                    #         symbol=label,
+                    #         bars=len(rows),
+                    #         reason="zero variance; useless for alpha",
+                    #     )
+                    #     continue
+                    # AFTER
+                    changes = [r.yield_change for r in rows if r.yield_change is not None]
+                    if not changes or len(set(changes)) == 1:
+                        log.warn(
+                            "constant yield_change; excluding from snapshot",
+                            symbol=label,
+                            bars=len(rows),
+                            reason="zero variance; useless for alpha",
+                        )
+                        continue
+                    # Build DataFrame with MAPIS column names — matches BOND_COLUMNS
+                    bucket[label] = pd.DataFrame(
+                        [
+                            {
+                                "ts":                  r.ts,
+                                "price":               r.price,
+                                "yield_to_maturity":   r.yield_to_maturity,
+                                "yield_change":        r.yield_change,
+                                "spread_vs_benchmark": r.spread_vs_benchmark,
+                                "duration":            r.duration,
+                                "coupon_rate":         r.coupon_rate,
+                                "rolling_vol_21d":     r.rolling_vol_21d,
+                            }
+                            for r in rows
+                        ]
+                    ).set_index("ts")
+
+                else:
+                    # ── Equity / FX path — identical to original ──────────────
+                    rows = (
+                        session.execute(
+                            select(OHLCV)
+                            .where(
+                                and_(
+                                    OHLCV.instrument_id == inst.instrument_id,
+                                    OHLCV.ts >= start,
+                                    OHLCV.ts <= end,
+                                )
+                            )
+                            .order_by(OHLCV.ts)
+                        )
+                        .scalars()
+                        .all()
                     )
-                    continue
-                closes = [r.adj_close for r in rows]
-                if min(closes) == max(closes):
-                    log.warn(
-                        "constant close; excluding from snapshot",
-                        symbol=label,
-                        bars=len(rows),
-                        reason="would make covariance singular",
-                    )
-                    continue
-                snapshot[label] = pd.DataFrame(
-                    [
-                        {
-                            "ts": r.ts,
-                            "open": r.open,
-                            "high": r.high,
-                            "low": r.low,
-                            "close": r.close,
-                            "adj_close": r.adj_close,
-                            "volume": r.volume,
-                        }
-                        for r in rows
-                    ]
-                ).set_index("ts")
+                    if not rows:
+                        continue
+                    if len(rows) < 2:
+                        log.warn(
+                            "too few bars; excluding from snapshot",
+                            symbol=label,
+                            bars=len(rows),
+                            window_start=start.isoformat(),
+                            window_end=end.isoformat(),
+                            reason="need >=2 to form a return",
+                        )
+                        continue
+                    closes = [r.adj_close for r in rows]
+                    if min(closes) == max(closes):
+                        log.warn(
+                            "constant close; excluding from snapshot",
+                            symbol=label,
+                            bars=len(rows),
+                            reason="would make covariance singular",
+                        )
+                        continue
+                    bucket[label] = pd.DataFrame(
+                        [
+                            {
+                                "ts":        r.ts,
+                                "open":      r.open,
+                                "high":      r.high,
+                                "low":       r.low,
+                                "close":     r.close,
+                                "Adj Close": r.adj_close,
+                                "volume":    r.volume,
+                            }
+                            for r in rows
+                        ]
+                    ).set_index("ts")
+
     return snapshot
 
 
@@ -577,6 +858,7 @@ def main() -> None:
     signal.signal(signal.SIGTERM, signal.default_int_handler)
 
     end = date.today()
+    # end = date.today() - timedelta(days=2)
     start = end - timedelta(days=LOOKBACK_DAYS)
     log.info(
         "lookback window",
@@ -599,32 +881,41 @@ def main() -> None:
                 fetch_and_store(engine, universe, start, end)
 
     with log.pipeline("snapshot.load"):
-        snapshot: dict[str, pd.DataFrame] = load_snapshot(
+        snapshot: dict[str, dict[str, pd.DataFrame]] = load_snapshot(
             engine, INSTRUMENT_UNIVERSES, start, end
         )
-        log.info("snapshot loaded", assets=len(snapshot))
-    if not snapshot:
+        total_assets = sum(len(v) for v in snapshot.values())
+        log.info(
+            "snapshot loaded",
+            asset_classes=list(snapshot.keys()),
+            total_assets=total_assets,
+            per_class={ac: len(tickers) for ac, tickers in snapshot.items()},
+        )
+
+    if not snapshot or total_assets == 0:
         log.warn("snapshot empty; nothing to publish")
         return
 
     with log.pipeline("publish.bind", addr=PUB_ADDR):
         ctx, pub = make_publisher()
-        log.info("publisher bound", addr=PUB_ADDR, assets=len(snapshot))
+        log.info("publisher bound", addr=PUB_ADDR, total_assets=total_assets)
 
     time.sleep(2.0)  # Wait for subscribers to connect before the first message.
 
     payload = pickle.dumps(
         {
-            "tickers": list(snapshot.keys()),
+            "tickers": {
+                ac: list(tickers.keys()) for ac, tickers in snapshot.items()
+            },
             "start": start.isoformat(),
-            "end": end.isoformat(),
-            "ohlcv": snapshot,
+            "end":   end.isoformat(),
+            "data":  snapshot,   # { "equity": {…}, "fx": {…}, "bond": {…} }
         }
     )
     log.info(
         "snapshot serialized",
         bytes=len(payload),
-        assets=len(snapshot),
+        total_assets=total_assets,
     )
 
     seq = 0
@@ -636,7 +927,7 @@ def main() -> None:
                 "published",
                 topic=TOPIC_OHLCV.decode(),
                 seq=seq,
-                assets=len(snapshot),
+                total_assets=total_assets,
             )
             time.sleep(PUBLISH_INTERVAL_S)
     except KeyboardInterrupt:
